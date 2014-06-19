@@ -2,7 +2,7 @@
 #include <cstring>
 #include "bc.hh"
 #include "gate.hh"
-#include "parser.tab.h"
+#include "parser.hh"
 extern void bcp_error2(const char *, ...);
 bool _bcp_in_header;
 
