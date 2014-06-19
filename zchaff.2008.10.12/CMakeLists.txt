@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 2.8.9)
+
+project(zchaff)
 
 add_custom_command(OUTPUT zchaff_c_wrapper.cpp COMMAND
 	sed 's/EXTERN/extern \"C\"/' zchaff_wrapper.wrp > zchaff_c_wrapper.cpp)
