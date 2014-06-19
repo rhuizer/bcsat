@@ -68,8 +68,6 @@ set_target_properties(minisat-lib-shared
     VERSION ${MINISAT_VERSION}
     SOVERSION ${MINISAT_SOVERSION})
 
-set_target_properties(minisat_simp       PROPERTIES OUTPUT_NAME "minisat")
-
 #--------------------------------------------------------------------------------------------------
 # Installation targets:
 
