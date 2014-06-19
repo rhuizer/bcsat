@@ -14,5 +14,6 @@ set(SOURCES defs.cc bc.cc gate.cc gatehash.cc handle.cc timer.cc heap.cc
             ${BISON_bcsat_parser_OUTPUTS}
             ${FLEX_bcsat_lexer_OUTPUTS})
 add_executable(bc2cnf bc2cnf.cc ${SOURCES})
+add_executable(bc2edimacs bc2edimacs.cc ${SOURCES})
 add_executable(edimacs2bc edimacs2bc.cc ${SOURCES})
 add_executable(bc2iscas89 bc2iscas89.cc ${SOURCES})
