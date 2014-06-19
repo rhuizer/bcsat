@@ -57,6 +57,8 @@ int BC::minisat_solve(const bool perform_simplifications
 #error "Unknown MiniSAT version defined"
 #endif
 
+using namespace Minisat;
+
 int BC::minisat_solve(const bool perform_simplifications
 		      , const bool polarity_cnf
 		      , const bool notless
@@ -247,7 +249,7 @@ int BC::minisat_solve(const bool perform_simplifications
    * Build and feed the CNF to MiniSat
    */
   {
-    typedef ::Lit MiniSatLit;
+    typedef Lit MiniSatLit;
     ::vec<MiniSatLit> clause;
     std::list<std::vector<int> *> clauses;
     for(Gate *gate = first_gate; gate; gate = gate->next)
@@ -281,9 +283,7 @@ int BC::minisat_solve(const bool perform_simplifications
 	      {
 		int lit = *li;
 		assert(lit != 0 && abs(lit) < max_var_num);
-		MiniSatLit minisat_lit = MiniSatLit(map_gatenum_to_minisat_var[abs(lit)]);
-		if(lit < 0)
-		  minisat_lit = ~minisat_lit;
+		MiniSatLit minisat_lit = mkLit(map_gatenum_to_minisat_var[abs(lit)], lit < 0);
 		clause.push(minisat_lit);
 	      }
 	    /* Add clause to Minisat */
@@ -296,10 +296,8 @@ int BC::minisat_solve(const bool perform_simplifications
         if(gate->determined)
 	  {
 	    clause.clear();
-	    MiniSatLit minisat_lit = MiniSatLit(map_gatenum_to_minisat_var[gate->temp]);
 	    bool negated = false;
-	    if((gate->value == false) ^ negated)
-	      minisat_lit = ~minisat_lit;
+	    MiniSatLit minisat_lit = mkLit(map_gatenum_to_minisat_var[gate->temp], (gate->value == false) ^ negated);
 	    clause.push(minisat_lit);
 	    solver->addClause(clause);
 	    nof_clauses++;
@@ -310,14 +308,14 @@ int BC::minisat_solve(const bool perform_simplifications
 	    if(gate->type == Gate::tTRUE)
 	      {
 		clause.clear();
-		clause.push(MiniSatLit(map_gatenum_to_minisat_var[gate->temp]));
+		clause.push(mkLit(map_gatenum_to_minisat_var[gate->temp]));
 		solver->addClause(clause);
 		nof_clauses++;
 	      }
 	    else if(gate->type == Gate::tFALSE)
 	      {
 		clause.clear();
-		clause.push(~MiniSatLit(map_gatenum_to_minisat_var[gate->temp]));
+		clause.push(mkLit(map_gatenum_to_minisat_var[gate->temp], true));
 		solver->addClause(clause);
 		nof_clauses++;
 	      }
