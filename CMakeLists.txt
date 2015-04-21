@@ -6,15 +6,21 @@ find_package(FLEX REQUIRED)
 
 BISON_TARGET(bcsat_parser parser.y ${CMAKE_BINARY_DIR}/parser.cc
              COMPILE_FLAGS "-b parser -p bcp_ -d")
+BISON_TARGET(bcsat_parser11 parser11.y ${CMAKE_BINARY_DIR}/parser11.cc
+             COMPILE_FLAGS "-b parser11 -p bcp11_ -d")
 FLEX_TARGET(bcsat_lexer lexer.lex ${CMAKE_BINARY_DIR}/lexer.cc
             COMPILE_FLAGS "-L -Pbcp_")
+FLEX_TARGET(bcsat_lexer11 lexer11.lex ${CMAKE_BINARY_DIR}/lexer11.cc
+            COMPILE_FLAGS "-L -Pbcp11_")
 ADD_FLEX_BISON_DEPENDENCY(bcsat_lexer bcsat_parser)
 
 set(SOURCES defs.cc bc.cc gate.cc gatehash.cc handle.cc timer.cc heap.cc
             defs.hh bc.hh gate.hh gatehash.hh handle.hh timer.hh heap.hh
             hashset.hh
             ${BISON_bcsat_parser_OUTPUTS}
-            ${FLEX_bcsat_lexer_OUTPUTS})
+            ${BISON_bcsat_parser11_OUTPUTS}
+            ${FLEX_bcsat_lexer_OUTPUTS}
+            ${FLEX_bcsat_lexer11_OUTPUTS})
 
 include_directories(${PROJECT_SOURCE_DIR})
 
