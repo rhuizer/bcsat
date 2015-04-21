@@ -1,5 +1,5 @@
 /*
- Copyright (C) 2003-2009 Tommi Junttila
+ Copyright (C) 2003-2015 Tommi Junttila
  
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License version 2
@@ -34,10 +34,11 @@ static bool opt_cnf_notless = true;
 static bool opt_cnf_polarity = false;
 static bool opt_cnf_permute = false;
 static unsigned int opt_cnf_permute_seed = 0;
-static bool opt_perform_coi = true;
 static bool opt_perform_simplifications = true;
 static bool opt_preserve_all_solutions = false;
 static bool opt_print_input_gates = false;
+static bool opt_output_xcnf = false;
+static SimplifyOptions simplify_opts;
 
 static void
 usage(FILE* const fp, const char* argv0)
@@ -62,6 +63,7 @@ usage(FILE* const fp, const char* argv0)
 "  -nots           perform an unoptimized CNF-translation with NOT-gates\n"
 "  -polarity_cnf   use polarity exploiting CNF translation\n"
 "  -permute_cnf=s  permute CNF variables with seed s\n"
+"  -xcnf           output xcnf (dimacs CNF with xor clauses)\n"
 "  -print_inputs   print input gate names\n"
 "  <circuit file>  input circuit file (if not specified, stdin is used)\n"
 "  <cnf file>      output cnf file (if not specified, stdout is used)\n"
@@ -72,6 +74,12 @@ usage(FILE* const fp, const char* argv0)
 static void
 parse_options(const int argc, const char** argv)
 {
+  /* Set default options */
+  simplify_opts.use_coi = true;
+#ifdef DEVELOPEMENT
+  simplify_opts.absorb_children = SimplifyOptions::CHILDABSORB_NONE;
+#endif
+
   for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "-verbose") == 0)
       verbose = true;
@@ -84,9 +92,11 @@ parse_options(const int argc, const char** argv)
     else if(strcmp(argv[i], "-nosimplify") == 0)
       opt_perform_simplifications = false;
     else if(strcmp(argv[i], "-nocoi") == 0)
-      opt_perform_coi = false;
+      simplify_opts.use_coi = false;
     else if(strcmp(argv[i], "-nots") == 0)
       opt_cnf_notless = false;
+    else if(strcmp(argv[i], "-xcnf") == 0)
+      opt_output_xcnf = true;
     else if(strcmp(argv[i], "-print_inputs") == 0)
       opt_print_input_gates = true;
     else if(argv[i][0] == '-') {
@@ -128,12 +138,8 @@ main(const int argc, const char** argv)
 
   parse_options(argc, argv);
   
-  if(verbose)
-    {
-      fprintf(verbstr, "parsing from %s\n", infilename?infilename:"stdin");
-      fflush(verbstr);
-    }
-  
+  verbose_print("Parsing from %s\n", infilename?infilename:"stdin");
+
   circuit = BC::parse_circuit(infile);
   if(circuit == 0)
     exit(1);
@@ -141,11 +147,8 @@ main(const int argc, const char** argv)
   if(infilename)
     fclose(infile);
 
-  if(verbose)
-    {
-      fprintf(verbstr, "The circuit has %d gates\n", circuit->count_gates());
-      fflush(verbstr);
-    }
+  verbose_print("The circuit has %d gates\n", circuit->count_gates());
+
 
   if(opt_print_input_gates and verbstr)
     {
@@ -190,7 +193,7 @@ main(const int argc, const char** argv)
    */
   if(opt_perform_simplifications)
     {
-      if(!circuit->simplify(false))
+      if(!circuit->simplify(simplify_opts))
 	goto unsat_exit;
     }
   else
@@ -207,7 +210,8 @@ main(const int argc, const char** argv)
   
   if(opt_perform_simplifications)
     {
-      if(!circuit->simplify(true))
+      simplify_opts.preserve_cnf_normalized_form = true;
+      if(!circuit->simplify(simplify_opts))
 	goto unsat_exit;
     } 
   else
@@ -217,6 +221,7 @@ main(const int argc, const char** argv)
     }
   
   
+
   /*
    * Print some statistics
    */
@@ -224,11 +229,10 @@ main(const int argc, const char** argv)
     {
       unsigned int max_min_height, max_max_height;
       circuit->compute_stats(max_min_height, max_max_height);
-      fprintf(verbstr, "The max-min height of the circuit is %u\n",
-              max_min_height);
-      fprintf(verbstr, "The max-max height of the circuit is %u\n",
-              max_max_height);
-      fflush(verbstr);
+      verbose_print("The max-min height of the circuit is %u\n",
+		    max_min_height);
+      verbose_print("The max-max height of the circuit is %u\n",
+		    max_max_height);
     }
 
   /*
@@ -239,16 +243,12 @@ main(const int argc, const char** argv)
     circuit->reset_temp_fields(-1);
     for(Gate* gate = circuit->first_gate; gate; gate = gate->next)
       {
-	if(opt_perform_coi == false or
+	if(opt_preserve_all_solutions == true or
+	   simplify_opts.use_coi == false or
 	   (gate->determined and !gate->is_justified()))
 	  gate->mark_coi(nof_relevant_gates);
       }
-    if(verbose)
-      {
-	fprintf(verbstr, "The circuit has %d relevant gates\n",
-		nof_relevant_gates);
-	fflush(verbstr);
-      }
+    verbose_print("The circuit has %d relevant gates\n", nof_relevant_gates);
     if(nof_relevant_gates == 0)
       {
 	goto sat_exit;
@@ -284,11 +284,8 @@ main(const int argc, const char** argv)
     max_var_num = gate_num;
     assert(max_var_num > 0);
     
-    if(verbose) {
-      fprintf(verbstr, "The circuit has %d relevant input gates\n",
-              nof_relevant_input_gates);
-      fflush(verbstr);
-    }
+    verbose_print("The circuit has %d relevant input gates\n",
+		  nof_relevant_input_gates);
   }
 
 
@@ -297,10 +294,8 @@ main(const int argc, const char** argv)
    */
   if(opt_cnf_permute)
     {
-      if(verbose)
-	{
-	  fprintf(verbstr, "Permuting the CNF variables..."); fflush(verbstr);
-	}
+      verbose_print("Permuting the CNF variables...");
+
       unsigned int* const perm = my_perm(max_var_num, opt_cnf_permute_seed);
       for(Gate* gate = circuit->first_gate; gate; gate = gate->next)
 	{
@@ -311,10 +306,7 @@ main(const int argc, const char** argv)
 	  assert(gate->temp > 0 && gate->temp <= max_var_num);
 	}
       free(perm);
-      if(verbose)
-	{
-	  fprintf(verbstr, "done\n"); fflush(verbstr);
-	}
+      verbose_print("done\n");
     }
 
   /*
@@ -323,7 +315,7 @@ main(const int argc, const char** argv)
   fprintf(outfile, "\
 c This is a CNF SAT formula in the DIMACS CNF format,\n\
 c produced with the bc2cnf translator by Tommi Junttila;\n\
-c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
+c see http://users.ics.aalto.fi/tjunttil/circuits/index.html\n\
 ");
  
   /*
@@ -365,13 +357,11 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
      * Scan the CNF in order to find the number of clauses,
      * required by the DIMACS header
      */
-    if(verbose)
-      {
-	fprintf(verbstr, "Computing cnf size...");
-	fflush(verbstr);
-      }
+    verbose_print("Computing cnf size...");
+
     unsigned int nof_cnf_clauses = 0;
-    std::list<std::vector<int> *> clauses;
+    std::list<std::vector<int> *> cnf_clauses;
+    std::list<std::vector<int> *> xor_clauses;
     for(Gate* gate = circuit->first_gate; gate; gate = gate->next)
       {
 	DEBUG_ASSERT(gate->temp == -1 or
@@ -383,17 +373,21 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
         /*
          * Translation clauses
          */
-	if(opt_cnf_polarity)
-	  gate->cnf_get_clauses_polarity(clauses, opt_cnf_notless);
-	else
-	  gate->cnf_get_clauses(clauses, opt_cnf_notless);
+	if(opt_output_xcnf) {
+	  if(opt_cnf_polarity)
+	    gate->xcnf_get_clauses_polarity(cnf_clauses, xor_clauses, opt_cnf_notless);
+	  else
+	    gate->xcnf_get_clauses(cnf_clauses, xor_clauses, opt_cnf_notless);
+	} else {
+	  if(opt_cnf_polarity)
+	    gate->cnf_get_clauses_polarity(cnf_clauses, opt_cnf_notless);
+	  else
+	    gate->cnf_get_clauses(cnf_clauses, opt_cnf_notless);
+	}
 
-	nof_cnf_clauses += clauses.size();
-	while(!clauses.empty())
-	  {
-	    delete clauses.back();
-	    clauses.pop_back();
-	  }
+	nof_cnf_clauses += cnf_clauses.size();
+	while(!cnf_clauses.empty()) {delete cnf_clauses.back(); cnf_clauses.pop_back(); }
+	while(!xor_clauses.empty()) {delete xor_clauses.back(); xor_clauses.pop_back(); }
 
 	/*
          * Unit clauses for constrained gates
@@ -410,19 +404,18 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
 	  }
       }
 
-    if(verbose)
-      {
-	fprintf(verbstr, " done\n");
-	fprintf(verbstr, "The cnf has %d variables and %d clauses\n",
-		max_var_num, nof_cnf_clauses);
-	fprintf(verbstr, "Printing cnf...");
-	fflush(verbstr);
-      }
+    verbose_print(" done\n");
+    verbose_print("The cnf has %d variables and %d clauses\n",
+		  max_var_num, nof_cnf_clauses);
+    verbose_print("Printing the CNF formula...\n");
 
     /*
      * Print DIMACS header
      */
-    fprintf(outfile, "p cnf %d %u\n", max_var_num, nof_cnf_clauses);
+    if(opt_output_xcnf)
+      fprintf(outfile, "p xcnf %d %u\n", max_var_num, nof_cnf_clauses);
+    else
+      fprintf(outfile, "p cnf %d %u\n", max_var_num, nof_cnf_clauses);
 
     /*
      * Actually print the clauses
@@ -438,15 +431,22 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
         /*
          * Get clauses
          */
-	if(opt_cnf_polarity)
-	  gate->cnf_get_clauses_polarity(clauses, opt_cnf_notless);
-	else
-	  gate->cnf_get_clauses(clauses, opt_cnf_notless);
+	if(opt_output_xcnf) {
+	  if(opt_cnf_polarity)
+	    gate->xcnf_get_clauses_polarity(cnf_clauses, xor_clauses, opt_cnf_notless);
+	  else
+	    gate->xcnf_get_clauses(cnf_clauses, xor_clauses, opt_cnf_notless);
+	} else {
+	  if(opt_cnf_polarity)
+	    gate->cnf_get_clauses_polarity(cnf_clauses, opt_cnf_notless);
+	  else
+	    gate->cnf_get_clauses(cnf_clauses, opt_cnf_notless);
+	}
 
-        while(!clauses.empty())
+        while(!cnf_clauses.empty())
 	  {
-	    std::vector<int> *cl = clauses.back();
-	    clauses.pop_back();
+	    std::vector<int> *cl = cnf_clauses.back();
+	    cnf_clauses.pop_back();
 	    for(std::vector<int>::iterator li = cl->begin();
 		li != cl->end();
 		li++)
@@ -457,6 +457,22 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
 	      }
 	    fprintf(outfile, "0\n");
 	    nof_cnf_clauses_printed++;
+	    delete cl;
+	  }
+        while(!xor_clauses.empty())
+	  {
+	    std::vector<int> *cl = xor_clauses.back();
+	    xor_clauses.pop_back();
+	    fprintf(outfile, "x ");
+	    for(std::vector<int>::iterator li = cl->begin();
+		li != cl->end();
+		li++)
+	      {
+		const int lit = *li;
+		assert(lit != 0 && abs(lit) <= max_var_num);
+		fprintf(outfile, "%d ", lit);
+	      }
+	    fprintf(outfile, "0\n");
 	    delete cl;
 	  }
 	/*
@@ -484,11 +500,7 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
       }
     assert(nof_cnf_clauses_printed == nof_cnf_clauses);
 
-    if(verbose)
-      {
-	fprintf(verbstr, " done\n");
-	fflush(verbstr);
-      }
+    verbose_print("Done\n");
   }
   
   /* Clean'n'exit */
@@ -496,11 +508,7 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
   return 0;
 
  sat_exit:
-  if(verbose)
-    {
-      fprintf(verbstr, "The circuit was found satisfiable, constructing a truth assignment... ");
-      fflush(verbstr);
-    }
+  verbose_print("The circuit was found satisfiable, constructing a truth assignment... ");
 
   /*
    * Assign irrelevant input gates to arbitrary values
@@ -538,12 +546,8 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
       exit(-1);
     }
 
-  if(verbose)
-    {
-      fprintf(verbstr, "done\n");
-      fprintf(verbstr, "Printing a dummy cnf containing the solution in comments... ");
-      fflush(verbstr);
-    }
+  verbose_print(" done\n");
+  verbose_print("Printing a dummy cnf containing the solution in comments\n");
 
   /*
    * Print satisfying truth assignment
@@ -563,13 +567,10 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
       }
     }
   /* And a dummy satisfiable CNF */
-  fprintf(outfile, "p cnf 1 1\n");
+  if(opt_output_xcnf) fprintf(outfile, "p xcnf 1 1\n");
+  else fprintf(outfile, "p cnf 1 1\n");
   fprintf(outfile, "1 0\n");
-  if(verbose)
-    {
-      fprintf(verbstr, "done\n");
-      fflush(verbstr);
-    }
+  verbose_print("Done\n");
 
   /* Clean'n'exit */
   delete circuit; circuit = 0;
@@ -577,11 +578,8 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
 
 
  unsat_exit:
-  if(verbose)
-    {
-      fprintf(verbstr, "The circuit was found unsatisfiable, printing a dummy unsatisfiable cnf\n");
-      fflush(verbstr);
-    }
+  verbose_print("The circuit was found unsatisfiable, printing a dummy unsatisfiable cnf\n");
+
   /*
    * Print a small unsatisfiable CNF
    */

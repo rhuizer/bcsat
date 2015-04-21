@@ -19,6 +19,7 @@
 #define BC_HH
 
 class BC;
+class SimplifyOptions;
 
 #include <cstdio>
 #include <list>
@@ -42,6 +43,11 @@ class BC
   bool changed;
 
   bool contradictory;
+
+  std::vector<Gate*> index_to_gate;
+  std::vector<unsigned int> free_gate_indices;
+
+
 
 public:
   BC();
@@ -218,6 +224,7 @@ public:
 
 
 
+
   /**
    * Translate the circuit in edimacs and print
    * Note: may transform the circuit structure.
@@ -262,12 +269,14 @@ public:
    * The circuit is left in an unclear state at the moment
    */
   int minisat_solve(const bool perform_simplifications,
+		    const SimplifyOptions& opts,
 		    const bool polarity_cnf,
 		    const bool notless,
-		    /*const bool input_cuts_only,*/
+		    const bool input_cuts_only,
 		    const bool permute_cnf,
 		    const unsigned int permute_cnf_seed
 		    );
+
 
 
 
@@ -464,13 +473,18 @@ public:
    * precede the gate in the order.
    */
   std::vector<Gate *>* get_top_down_ordering() const;
-
+  /**
+   * Get a total ordering of the gates so that all the children of a gate
+   * precede the gate in the order.
+   */
+  std::vector<Gate *>* get_bottom_up_ordering() const;
+    
   /**
    * Perform some simplifications in the circuit.
    * @return false if an incosistency is found
    *         (implying that the circuit is unsatisfiable).
    */
-  bool simplify(const bool opt_preserve_cnf_normalized_form);
+  bool simplify(const SimplifyOptions& opts);
 
 
   /**
@@ -496,8 +510,6 @@ public:
 
 
 private:
-  std::vector<Gate*> index_to_gate;
-  std::vector<unsigned int> free_gate_indices;
   void release_gate(Gate* const gate);
   void install_gate(Gate* const gate);
 
@@ -511,5 +523,34 @@ private:
    */
   bool depends_on(Gate * const gate1, Gate * const gate2);
 };
+
+
+class SimplifyOptions {
+public:
+  SimplifyOptions() {
+    preserve_cnf_normalized_form = false;
+    may_transform_input_gates = true;
+    constant_folding = true;
+    downward_bcp = true;
+    remove_duplicate_children = true;
+    remove_g_not_g_children = true;
+    inline_equivalences = true;
+    absorb_children = CHILDABSORB_NONE;
+    misc_reductions = true;
+    use_coi = true;
+  }
+  typedef enum {CHILDABSORB_NONE = 0, CHILDABSORB_UNSHARED, CHILDABSORB_ALL} ChildAbsorb;
+  bool preserve_cnf_normalized_form;
+  bool may_transform_input_gates;
+  bool constant_folding;
+  bool downward_bcp;
+  bool remove_duplicate_children;
+  bool remove_g_not_g_children;
+  bool inline_equivalences;
+  ChildAbsorb absorb_children;
+  bool misc_reductions;
+  bool use_coi;
+};
+
 
 #endif

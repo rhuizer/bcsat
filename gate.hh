@@ -58,15 +58,20 @@ private:
 			unsigned int& nof_false,
 			unsigned int& nof_undet) const;
 
-  void remove_determined_children(BC *bc);
+  void remove_determined_children(BC* const bc);
 
   void add_in_pstack(BC * const bc);
   void add_parents_in_pstack(BC * const bc);
   void add_children_in_pstack(BC * const bc);
-  void transform_into_constant(BC *bc, bool value);
-  void remove_duplicate_children(BC *);
-  bool remove_g_not_g_and_duplicate_children(BC *);
-  bool remove_parity_duplicate_children(BC *);
+  /** It is an error to call this function when the gate already has
+   * the value !value */
+  void transform_into_constant(BC* const bc, const bool value);
+  bool remove_duplicate_and_g_not_g_children(BC* const bc,
+					     const bool duplicates,
+					     const bool g_not_g);
+  bool remove_parity_duplicate_and_g_not_g_children(BC* const bc,
+						    const bool duplicates,
+						    const bool g_not_g);
   bool remove_cardinality_g_not_g(BC *);
 
   /*
@@ -80,6 +85,7 @@ private:
    */
   unsigned int compute_min_height();
   unsigned int compute_max_height();
+
 
 public:
   /** The type of the gate */
@@ -104,10 +110,10 @@ public:
    * A helper for BC::print(FILE * const fp). */
   void print_child_list(FILE* const fp) const;
 
-
-
   ChildAssoc* children;
+  unsigned int _nof_children;
   ChildAssoc* parents;
+
   /** The lower bound for true children in THRESHOLD and ATLEAST gates. */
   unsigned int tmin;
   /** The upper bound for true children in THRESHOLD gates. */
@@ -143,15 +149,22 @@ public:
   ~Gate();
 
   bool share(BC * const bc, GateHash * const ht, Gate ** const cache);
-  bool cnf_normalize(BC * const bc);
+  bool cnf_normalize(BC* const bc);
 
-  int cnf_count_clauses(const bool notless);
+
   void cnf_get_clauses(std::list<std::vector<int> *> &clauses,
 		       const bool notless);
-
-  unsigned int cnf_count_clauses_polarity(const bool notless);
   void cnf_get_clauses_polarity(std::list<std::vector<int> *> &clauses,
 				const bool notless);
+
+  /** Get clauses and xor-clauses in the xcnf-translation. */
+  void xcnf_get_clauses(std::list<std::vector<int> *> &cnf_clauses,
+			std::list<std::vector<int> *> &xor_clauses,
+			const bool notless);
+  /** Get clauses and xor-clauses in the xcnf-translation with polarity. */
+  void xcnf_get_clauses_polarity(std::list<std::vector<int> *> &cnf_clauses,
+				 std::list<std::vector<int> *> &xor_clauses,
+				 const bool notless);
 
   bool edimacs_normalize(BC* const bc);
   void edimacs_print(FILE* const fp, const bool notless);
@@ -185,10 +198,19 @@ public:
   /** Count how many parents the gate has.
    * Time requirement: O(N), where N is the number of parents */
   unsigned int count_parents() const;
+  /** Return true if the gate has any parents */
+  bool has_parents() const;
+  /** Return true if the gate has at least two parents */
+  bool has_many_parents() const;
 
   /** Count how many children the gate has.
    * Time requirement: O(N), where N is the number of children */
   unsigned int count_children() const;
+
+  /** Get the first child */
+  Gate* first_child() const;
+  /** Get the number of children of this gate. */
+  unsigned int nof_children() const {return _nof_children; }
 
   /** Add a new child association for the gate.
    *  The child is added to the >front< of the child list. */
@@ -208,7 +230,7 @@ public:
   /** Simplify the gate if possible.
    * @return false if an inconsistency was found (implying unsatisfiability
    *               of the circuit) */
-  bool simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form);
+  bool simplify(BC* const bc, const SimplifyOptions& opts);
 
 
 
@@ -260,5 +282,27 @@ private:
   void unlink_parent();
   void unlink_child();
 };
+
+
+inline Gate*
+Gate::first_child() const
+{
+  DEBUG_ASSERT(children);
+  DEBUG_ASSERT(children->child != this);
+  return children->child;
+}
+
+inline bool
+Gate::has_many_parents() const
+{
+  return(parents and parents->next_parent);
+}
+
+inline bool
+Gate::has_parents() const
+{
+  return(parents);
+}
+
 
 #endif

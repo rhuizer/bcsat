@@ -168,7 +168,8 @@ main(const int argc, const char** argv)
    */
   if(opt_perform_simplifications)
     {
-      if(!circuit->simplify(false))
+      SimplifyOptions opts;
+      if(!circuit->simplify(opts))
 	goto unsat_exit;
     }
   else
@@ -186,7 +187,7 @@ main(const int argc, const char** argv)
   fprintf(outfile, "\
 c This is a SAT formula in the EDIMACS format,\n\
 c produced with the bc2edimacs translator by Tommi Junttila;\n\
-c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
+c see http://users.ics.aalto.fi/tjunttil/circuits/index.html\n\
 ");
 
   /*
@@ -203,7 +204,7 @@ c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
   fprintf(outfile, "\
 c This is a SAT formula in the EDIMACS format,\n\
 c produced with the bc2edimacs translator by Tommi Junttila;\n\
-c see http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
+c see http://users.ics.aalto.fi/tjunttil/circuits/index.html\n\
 c The instance was determined unsatisfiable during preprocessing.\n\
 ");
   fprintf(outfile, "p noncnf 1\n");

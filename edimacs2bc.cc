@@ -15,9 +15,9 @@
  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <cstdio>
+#include <cstring>
 #include <cctype>
-#include <stdio.h>
-#include <string.h>
 #include <vector>
 #include "defs.hh"
 
@@ -376,7 +376,7 @@ int main(const int argc, const char **argv)
 	    assert(IOs.size() >= 1);
 	    fprintf(outfile, "g%d := %s[%d,%lu](",
 		    abs(IOs[0]), (IOs[0]>0)?"":"~",
-		    parameters[0], IOs.size()-1);
+		    parameters[0], (long unsigned int)IOs.size()-1);
 	    const char *sep = "";
 	    for(unsigned int i = 1; i < IOs.size(); i++)
 	      {

@@ -115,8 +115,8 @@ int main(int argc, const char **argv)
   std::vector<Gate *> *ordering = 0;
 
   const char* const iscas_prefix = "\
-# Generated with the bc2iscas89 tool, version 0.35\n\
-# See http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n\
+# Generated with the bc2iscas89 tool, version 0.40\n\
+# See http://users.ics.aalto.fi/tjunttil/circuits/index.html\n\
 # for the BCpackage Boolean circuit tool set\n\
 ";
 
@@ -187,7 +187,8 @@ int main(int argc, const char **argv)
    */
   if(opt_perform_simplifications)
     {
-      if(!circuit->simplify(false))
+      SimplifyOptions opts;
+      if(!circuit->simplify(opts))
 	goto unsat_exit;
     }
   else
@@ -203,7 +204,9 @@ int main(int argc, const char **argv)
   
   if(opt_perform_simplifications)
     {
-      if(!circuit->simplify(true))
+      SimplifyOptions opts;
+      opts.preserve_cnf_normalized_form = true;
+      if(!circuit->simplify(opts))
 	goto unsat_exit;
     } 
   else

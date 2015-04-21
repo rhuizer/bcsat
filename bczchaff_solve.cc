@@ -85,9 +85,11 @@ BC::zchaff_solve(const bool perform_simplifications,
   unsigned int nof_clauses = 0;
   SAT_Manager mng = 0;
 
+  SimplifyOptions simplify_opts;
+
   if(perform_simplifications)
     {
-      if(!simplify(false))
+      if(!simplify(simplify_opts))
 	return 0;
     }
   else
@@ -102,7 +104,8 @@ BC::zchaff_solve(const bool perform_simplifications,
   
   if(perform_simplifications)
     {
-      if(!simplify(true))
+      simplify_opts.preserve_cnf_normalized_form = true;
+      if(!simplify(simplify_opts))
 	return 0;
     } 
   else

@@ -21,6 +21,7 @@
 #include <list>
 #include "defs.hh"
 #include "bc.hh"
+#include "timer.hh"
 
 
 
@@ -31,8 +32,10 @@
  *
  */
 int BC::minisat_solve(const bool perform_simplifications
+		      , const SimplifyOptions& simplify_opts
 		      , const bool polarity_cnf
 		      , const bool notless
+		      , const bool input_cuts_only
 		      , const bool permute_cnf
 		      , const unsigned int permute_cnf_seed
 		      )
@@ -57,11 +60,14 @@ int BC::minisat_solve(const bool perform_simplifications
 #error "Unknown MiniSAT version defined"
 #endif
 
-using namespace Minisat;
+
+
 
 int BC::minisat_solve(const bool perform_simplifications
+		      , const SimplifyOptions& simplify_opts
 		      , const bool polarity_cnf
 		      , const bool notless
+		      , const bool input_cuts_only
 		      , const bool permute_cnf
 		      , const unsigned int permute_cnf_seed
 		      )
@@ -80,9 +86,11 @@ int BC::minisat_solve(const bool perform_simplifications
 
   Var *map_gatenum_to_minisat_var = 0;
 
+  Timer timer;
+
   if(perform_simplifications)
     {
-      if(!simplify(false))
+      if(!simplify(simplify_opts))
 	return 0;
     }
   else
@@ -97,7 +105,9 @@ int BC::minisat_solve(const bool perform_simplifications
   
   if(perform_simplifications)
     {
-      if(!simplify(true))
+      SimplifyOptions _opts = simplify_opts;
+      _opts.preserve_cnf_normalized_form = true;
+      if(!simplify(_opts))
 	return 0;
     } 
   else
@@ -116,6 +126,7 @@ int BC::minisat_solve(const bool perform_simplifications
     {
       unsigned int max_min_height, max_max_height;
       compute_stats(max_min_height, max_max_height);
+      fprintf(verbstr, "Preprocessing time: %.2lf\n", timer.get_duration());
       fprintf(verbstr, "The max-min height of the circuit is %u\n",
               max_min_height);
       fprintf(verbstr, "The max-max height of the circuit is %u\n",
@@ -123,6 +134,8 @@ int BC::minisat_solve(const bool perform_simplifications
       fflush(verbstr);
     }
 
+  /* Next compute CNF translation time */
+  timer.reset();
 
   /*
    * Find the relevant gates and number them in temp field
@@ -135,7 +148,8 @@ int BC::minisat_solve(const bool perform_simplifications
 	     (gate->determined && gate->value == true));
       assert(gate->type != Gate::tFALSE ||
 	     (gate->determined && gate->value == false));
-      if(gate->determined && !gate->is_justified())
+      if(simplify_opts.use_coi == false or
+	 (gate->determined and !gate->is_justified()))
 	gate->mark_coi(nof_relevant_gates);
     }
   if(verbose) {
@@ -164,7 +178,7 @@ int BC::minisat_solve(const bool perform_simplifications
           /* Not relevant */
           continue;
         }
-        if(notless && gate->type == Gate::tNOT) {
+        if(notless and gate->type == Gate::tNOT) {
           /* NOT-less translation */
           assert(!gate->determined);
           assert(gate->children->child->type != Gate::tNOT);
@@ -249,7 +263,7 @@ int BC::minisat_solve(const bool perform_simplifications
    * Build and feed the CNF to MiniSat
    */
   {
-    typedef Lit MiniSatLit;
+    typedef ::Lit MiniSatLit;
     ::vec<MiniSatLit> clause;
     std::list<std::vector<int> *> clauses;
     for(Gate *gate = first_gate; gate; gate = gate->next)
@@ -283,7 +297,9 @@ int BC::minisat_solve(const bool perform_simplifications
 	      {
 		int lit = *li;
 		assert(lit != 0 && abs(lit) < max_var_num);
-		MiniSatLit minisat_lit = mkLit(map_gatenum_to_minisat_var[abs(lit)], lit < 0);
+		MiniSatLit minisat_lit = MiniSatLit(map_gatenum_to_minisat_var[abs(lit)]);
+		if(lit < 0)
+		  minisat_lit = ~minisat_lit;
 		clause.push(minisat_lit);
 	      }
 	    /* Add clause to Minisat */
@@ -296,8 +312,10 @@ int BC::minisat_solve(const bool perform_simplifications
         if(gate->determined)
 	  {
 	    clause.clear();
+	    MiniSatLit minisat_lit = MiniSatLit(map_gatenum_to_minisat_var[gate->temp]);
 	    bool negated = false;
-	    MiniSatLit minisat_lit = mkLit(map_gatenum_to_minisat_var[gate->temp], (gate->value == false) ^ negated);
+	    if((gate->value == false) ^ negated)
+	      minisat_lit = ~minisat_lit;
 	    clause.push(minisat_lit);
 	    solver->addClause(clause);
 	    nof_clauses++;
@@ -308,14 +326,14 @@ int BC::minisat_solve(const bool perform_simplifications
 	    if(gate->type == Gate::tTRUE)
 	      {
 		clause.clear();
-		clause.push(mkLit(map_gatenum_to_minisat_var[gate->temp]));
+		clause.push(MiniSatLit(map_gatenum_to_minisat_var[gate->temp]));
 		solver->addClause(clause);
 		nof_clauses++;
 	      }
 	    else if(gate->type == Gate::tFALSE)
 	      {
 		clause.clear();
-		clause.push(mkLit(map_gatenum_to_minisat_var[gate->temp], true));
+		clause.push(~MiniSatLit(map_gatenum_to_minisat_var[gate->temp]));
 		solver->addClause(clause);
 		nof_clauses++;
 	      }
@@ -323,14 +341,42 @@ int BC::minisat_solve(const bool perform_simplifications
       }
   }
 
+  /*
+   * Mark branchable variables
+   */
+  if(input_cuts_only)
+    {
+      for(Gate *gate = first_gate; gate; gate = gate->next)
+        {
+	  assert(gate->temp == -1 or
+		 (gate->temp > 0 and gate->temp < max_var_num));
+	  /* Not relevant? */
+	  if(gate->temp == -1)
+	    continue;
+	  /* An input or constant gate? */
+          if(gate->type == Gate::tVAR or
+	     gate->type == Gate::tFALSE or
+	     gate->type == Gate::tTRUE)
+	    {
+	      ;
+	    }
+	  else
+	    {
+	      /* Disable branching on this gate */
+	      solver->setDecisionVar(map_gatenum_to_minisat_var[gate->temp],
+				     false);
+	    }
+	}
+    }
+
+
  if(verbose)
    {
+     fprintf(verbstr, "CNF translation time: %.2lf\n", timer.get_duration());
      fprintf(verbstr, "The cnf has %d variables and %d clauses\n",
 	     max_var_num-1, nof_clauses);
      fflush(verbstr);
    }
-
-
 
 
   /*
@@ -341,21 +387,24 @@ int BC::minisat_solve(const bool perform_simplifications
       fprintf(verbstr, "Executing minisat...\n");
       fflush(verbstr);
     }
+  /* Next measure time spent in Minisat */
+  timer.reset();
   solver->verbosity = 2;
   result = solver->solve();
   
   if(verbose) {
+    fprintf(verbstr, "Minisat time: %.2lf\n", timer.get_duration());
     fprintf(verbstr, "Minisat statistics:\n");
 #if defined(MINISAT2CORE) || defined(MINISAT2SIMP)
-    fprintf(verbstr, "restarts              : %lld\n",
-	    solver->starts);
-    fprintf(verbstr, "conflicts             : %-12lld\n",
-	    solver->conflicts);
-    fprintf(verbstr, "decisions             : %-12lld\n",
-	    solver->decisions);
-    fprintf(verbstr, "propagations          : %-12lld\n",
-	    solver->propagations);
-    fprintf(verbstr, "conflict literals     : %-12lld   (%4.2f %% deleted)\n", solver->tot_literals, (solver->max_literals - solver->tot_literals)*100 / (double)solver->max_literals);
+    fprintf(verbstr, "restarts              : %llu\n",
+	    (long long unsigned int)solver->starts);
+    fprintf(verbstr, "conflicts             : %-12llu\n",
+	    (long long unsigned int)solver->conflicts);
+    fprintf(verbstr, "decisions             : %-12llu\n",
+	    (long long unsigned int)solver->decisions);
+    fprintf(verbstr, "propagations          : %-12llu\n",
+	    (long long unsigned int)solver->propagations);
+    fprintf(verbstr, "conflict literals     : %-12llu   (%4.2f %% deleted)\n", (long long unsigned int)solver->tot_literals, (solver->max_literals - solver->tot_literals)*100 / (double)solver->max_literals);
 #else
     fprintf(verbstr, "restarts              : %"I64_fmt"\n",
 	    solver->stats.starts);

@@ -20,7 +20,7 @@
 #include <cstdarg>
 #include "defs.hh"
 #include "bc.hh"
-
+#include "timer.hh"
 
 static const char *default_program_name = "bcminisat";
 
@@ -32,6 +32,8 @@ static bool opt_notless = true;
 static bool opt_perform_simplifications = true;
 static bool opt_print_input_gates = false;
 static bool opt_print_solution = true;
+static SimplifyOptions simplify_opts;
+static bool opt_branch_only_on_input_gates = false;
 static bool opt_permute_cnf = false;
 static unsigned int opt_permute_cnf_seed = 0;
 
@@ -52,6 +54,7 @@ usage(FILE* const fp, const char* argv0)
 "\n"
 "%s <options> [<circuit file>]\n"
 "\n"
+"  -input_cuts     only branch on input gates\n"
 "  -polarity_cnf   use polarity exploiting CNF translation\n"
 "  -nosimplify     do not perform simplifications\n"
 "  -nosolution     do not print a satisfying truth assignment\n"
@@ -70,9 +73,22 @@ parse_options(const int argc, const char** argv)
 {
   unsigned int seed;
 
+  /* Default simplifcation options */
+  simplify_opts.constant_folding = true;
+  simplify_opts.downward_bcp = true;
+  simplify_opts.remove_duplicate_children = true;
+  simplify_opts.remove_g_not_g_children = true;
+  simplify_opts.inline_equivalences = true;
+  simplify_opts.misc_reductions = true;
+  simplify_opts.use_coi = true;
+  simplify_opts.absorb_children = SimplifyOptions::CHILDABSORB_NONE;
+
+
   for(int i = 1; i < argc; i++) {
     if(strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "-verbose") == 0)
       verbose = true;
+    else if(strcmp(argv[i], "-input_cuts") == 0)
+      opt_branch_only_on_input_gates = true;
     else if(strcmp(argv[i], "-polarity_cnf") == 0)
       opt_polarity_cnf = true;
     else if(strcmp(argv[i], "-nosimplify") == 0)
@@ -122,18 +138,17 @@ main(const int argc, const char** argv)
 
   parse_options(argc, argv);
   
-  if(verbose) {
-    fprintf(verbstr, "Parsing from %s\n", infilename?infilename:"stdin");
-    fflush(verbstr); }
+  Timer timer_total;
+
+  verbose_print("Parsing from %s\n", infilename?infilename:"stdin");
   
   circuit = BC::parse_circuit(infile);
   if(circuit == 0)
     exit(-1);
   if(infilename) fclose(infile);
 
-  if(verbose) {
-    fprintf(verbstr, "The circuit has %d gates\n", circuit->count_gates());
-    fflush(verbstr); }
+  verbose_print("Parsing time: %.2lf\n", timer_total.get_duration());
+  verbose_print("The circuit has %d gates\n", circuit->count_gates());
   
 
   if(opt_print_input_gates and verbstr)
@@ -169,12 +184,15 @@ main(const int argc, const char** argv)
    */
   circuit->remove_underscore_names();
 
+
   /*
    * Do the actual solving...
    */
   result = circuit->minisat_solve(opt_perform_simplifications,
+				  simplify_opts,
 				  opt_polarity_cnf,
 				  opt_notless,
+				  opt_branch_only_on_input_gates,
 				  opt_permute_cnf,
 				  opt_permute_cnf_seed
 				  );
@@ -196,13 +214,14 @@ main(const int argc, const char** argv)
       fflush(stdout);
     }
 
-  /* Clean'n'exit */
-  delete circuit; circuit = 0;
-  return 0;
-
+  goto clean_and_exit;
+  
  unsat_exit:
   fprintf(stdout, "Unsatisfiable\n");
 
+ clean_and_exit:
+  verbose_print("Total time: %.2lf\n", timer_total.get_duration());
+  
   /* Clean'n'exit */
   delete circuit; circuit = 0;
   return 0;

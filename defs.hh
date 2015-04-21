@@ -18,16 +18,17 @@
 #ifndef DEFS_HH
 #define DEFS_HH
 
-#include <stdio.h>
-#include <assert.h>
-#include <stdarg.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdarg>
 #include <string.h>
-#include <stdlib.h>
+#include <cassert>
 
 extern const char *BCPACKAGE_VERSION;
 
 extern bool verbose;
 extern FILE *verbstr;
+void verbose_print(const char * fmt, ...);
 
 void internal_error(const char * fmt, ...);
 
@@ -35,6 +36,7 @@ void internal_error(const char * fmt, ...);
 #define BCSLS
 
 #ifdef DEBUG
+#define DEBUG_EXPENSIVE_CHECKS
 #define DEBUG_ASSERT(a) assert(a)
 #else
 #define DEBUG_ASSERT(a)

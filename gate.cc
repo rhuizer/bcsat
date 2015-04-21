@@ -22,8 +22,9 @@
 
 static const char *text_NI = "%s:%d: %s not implemented";
 static const char *text_NPN = "%s:%d: not properly normalized";
-static const char *text_SNH = "%s:%d: should not happen";
 static const bool should_not_happen = false;
+
+#define _should_not_happen() internal_error("%s:%d: should not happen",__FILE__,__LINE__)
 
 
 /**************************************************************************
@@ -67,13 +68,13 @@ void ChildAssoc::change_parent(Gate* const new_parent)
   link_parent(new_parent);
 }
 
-void ChildAssoc::link_parent(Gate* const f)
+void ChildAssoc::link_parent(Gate* const p)
 {
-  DEBUG_ASSERT(f);
+  DEBUG_ASSERT(p);
   DEBUG_ASSERT(parent == 0);
   DEBUG_ASSERT(prev_child == 0);
   DEBUG_ASSERT(next_child == 0);
-  parent = f;
+  parent = p;
   next_child = parent->children;
   if(next_child) {
     DEBUG_ASSERT(next_child->prev_child == 0);
@@ -81,6 +82,7 @@ void ChildAssoc::link_parent(Gate* const f)
   }
   prev_child = 0;
   parent->children = this;
+  parent->_nof_children++;
 }
 
 void ChildAssoc::link_child(Gate* const c)
@@ -110,7 +112,8 @@ void ChildAssoc::unlink_parent()
   else {
     DEBUG_ASSERT(parent->children == this);
     parent->children = next_child;
-  }    
+  }
+  parent->_nof_children--;
   parent = 0;
   next_child = 0;
   prev_child = 0;
@@ -161,6 +164,7 @@ const char* const Gate::typeNames[tNOFTYPES] = {"EQUIV",
 void
 Gate::init()
 {
+  _nof_children = 0;
   handles = 0;
   determined = false;
   value = false;
@@ -182,7 +186,7 @@ Gate::Gate(const Type t, Gate* const child) :
   type(t), index(UINT_MAX), children(0), parents(0)
 {
   init();
-  DEBUG_ASSERT(type == tNOT || type == tREF);
+  DEBUG_ASSERT(type == tNOT or type == tREF);
   DEBUG_ASSERT(child);
   add_child(child);
 }
@@ -251,6 +255,7 @@ Gate::~Gate()
 void
 Gate::add_child(Gate* const child)
 {
+  DEBUG_ASSERT(child != this);
   new ChildAssoc(this, child);
 }
 
@@ -313,6 +318,12 @@ Gate::print_child_list(FILE* const fp) const
 	fprintf(fp, "_t%u", child->temp);
     }
 }
+
+
+
+
+
+
 
 
 
@@ -392,9 +403,9 @@ Gate::test_acyclicity(std::list<const char*>& cycle)
 
 
 /**************************************************************************
- * Marks the cone of influence of the gate
- * Assigns each gate in the cone with a unique number
- * Assumes that the temp fields of gates are reset to -1
+ * Marks the cone of influence of the gate.
+ * Assigns each gate in the cone with a unique number.
+ * Assumes that the temp fields of gates have been reset to -1.
  **************************************************************************/
 
 void
@@ -448,421 +459,25 @@ Gate::add_children_in_pstack(BC* const bc)
 
 /**************************************************************************
  *
- * Transforms the gate into a constant gate
- * Used by simplify and cnf_normalize
- *
- **************************************************************************/
-
-void Gate::transform_into_constant(BC *bc, bool v)
-{
-  if(determined) {
-    assert(value == v);
-  } else {
-    determined = true;
-    value = v;
-  }
-  type = value?tTRUE:tFALSE;
-  while(children) {
-    Gate *child = children->child;
-    delete children;
-    if(!child->parents)
-      child->add_in_pstack(bc);
-  }
-  bc->changed = true;
-}
-
-
-
-
-/**************************************************************************
- *
- * Removes duplicate children of (some) n-ary gates
- *
- **************************************************************************/
-
-void Gate::remove_duplicate_children(BC *bc)
-{
-  if(!(type == tOR || type == tAND || type == tEQUIV))
-    return;
-
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-    ca->child->temp = 0;
-
-  for(ChildAssoc *ca = children; ca; ) {
-    Gate *child = ca->child;
-    if(child->determined) {
-      ca = ca->next_child;
-      continue;
-    }
-    if(child->temp == 0) {
-      child->temp = 1;
-      ca = ca->next_child;
-      continue;
-    }
-    /*
-     * A duplicate child found, remove because
-     * AND(x,x,y,a) == AND(x,y,z), OR(x,x,y,z) == OR(x,y,z), and
-     * EQUIV(x,x,y,z) == EQUIV(x,y,z)
-     */
-    ChildAssoc *next_ca = ca->next_child;
-    delete ca;
-    ca = next_ca;
-  }
-
-  assert(children);
-  if(count_children() == 1) {
-    /* Needs simplification: AND(x) == x, OR(x) == x, EQUIV(x) == T */
-    add_in_pstack(bc);
-  }
-
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-    ca->child->temp = 0;
-}
-
-
-
-
-
-/**************************************************************************
- *
- * Simplifies AND(x,~x,y,z) to F, OR(x,~x,y,z) to T, and EQUIV(x,~x,y,z) to F
- * Also removes duplicate children of AND, OR, and EQUIV
- * Returns false if an inconsistency is found (implying unsatisfiability)
- *
- **************************************************************************/
-
-bool Gate::remove_g_not_g_and_duplicate_children(BC *bc)
-{
-  if(!(type == tOR || type == tAND || type == tEQUIV))
-    return true;
-
-  /* Clear temp fields of children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-    ca->child->temp = 0;
-    if(ca->child->type == tNOT)
-      ca->child->children->child->temp = 0;
-  }
-
-  bool g_not_g_found = false;
-
-  for(ChildAssoc *ca = children; ca; ) {
-    Gate *child = ca->child;
-    if(child->determined) {
-      ca = ca->next_child;
-      continue;
-    }
-    if(child->temp == 2) {
-      /* child already seen in negative phase! */
-      g_not_g_found = true;
-      break;
-    }
-    if(child->temp == 1) {
-      /* A duplicate child found, remove because
-       * AND(x,x,y,a) == AND(x,y,z), OR(x,x,y,z) == OR(x,y,z)
-       * EQUIV(x,x,y,z) == EQUIV(x,y,z) */
-      ChildAssoc *next_ca = ca->next_child;
-      delete ca;
-      ca = next_ca;
-      continue;
-    }
-    /* Child not seen in either negative or positive phase */
-    child->temp = 1;
-
-    if(child->type == tNOT) {
-      Gate *grandchild = child->children->child;
-      if(grandchild->temp == 1) {
-	/* grandchild already seen in positive phase! */
-	g_not_g_found = true;
-	break;
-      }
-      grandchild->temp = 2;
-    }
-    ca = ca->next_child;
-    continue;
-  }
-
-  /* Clear temp fields of children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-    ca->child->temp = 0;
-    if(ca->child->type == tNOT)
-      ca->child->children->child->temp = 0;
-  }
-
-  if(g_not_g_found) {
-    if(type == tAND) {
-      /* AND(x,~x,y,z) = F */
-      if(determined && value != false)
-	return false;
-      transform_into_constant(bc, false);
-      add_parents_in_pstack(bc);
-      return true;
-    }
-    else if(type == tOR) {
-      /* OR(x,~x,y,z) = T */
-      if(determined && value != true)
-	return false;
-      transform_into_constant(bc, true);
-      add_parents_in_pstack(bc);
-      return true;
-    }
-    else if(type == tEQUIV) {
-      /* EQUIV(x,~x,y,z) = F */
-      if(determined && value != false)
-	return false;
-      transform_into_constant(bc, false);
-      add_parents_in_pstack(bc);
-      return true;
-    }
-    assert(should_not_happen);
-  }
-
-  if(count_children() == 1) {
-    /* Needs simplification: AND(x) == x, OR(x) == x, EQUIV(x) == T */
-    add_in_pstack(bc);
-  }
-
-  return true;
-}
-
-
-
-
-
-/**************************************************************************
- *
- * Removes duplicate children of ODD and EVEN by using equations
- * ODD(x,x,y,z) = ODD(y,z) and EVEN(x,x,y,z) = EVEN(y,z)
- * Returns false if an inconsistency is found (implying unsatisfiability)
- *
- **************************************************************************/
-
-bool Gate::remove_parity_duplicate_children(BC *bc)
-{
-  if(!(type == tODD || type == tEVEN))
-    return true;
-
-  /* Clear temp fields of children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-    ca->child->temp = 0;
-  
-  for(ChildAssoc *ca = children; ca; ) {
-    Gate *child = ca->child;
-    if(child->determined) {
-      /* Determined children are removed by simplify() */
-      ca = ca->next_child;
-      continue;
-    }
-    if(child->temp == 1) {
-      /* A duplicate child found, remove this and previous occurrence because
-       * ODD(x,x,y,z) == ODD(y,z) and EVEN(x,x,y,z) == EVEN(y,z) */
-      /* Reset temp fields */
-      child->temp = 0;
-      /* Remove the previous occurrence of child */
-      ChildAssoc *ca2 = children;
-      while(ca2 != ca) {
-	if(ca2->child == child) {
-	  delete ca2;
-	  break;
-	}
-	ca2 = ca2->next_child;
-      }
-      assert(ca2 != ca);
-      /* Remove child */
-      ChildAssoc *next_ca = ca->next_child;
-      delete ca;
-      ca = next_ca;
-      if(!child->parents)
-	child->add_in_pstack(bc);
-      continue;
-    }
-    /* Mark child as seen  */
-    child->temp = 1;
-
-    ca = ca->next_child;
-    continue;
-  }
-
-  /* Clear temp fields of (remaining) children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-    ca->child->temp = 0;
-
-  if(!children) {
-    if(type == tODD) {
-      /* ODD() = F*/
-      if(determined && value != false)
-	return false;
-      transform_into_constant(bc, false);
-      add_parents_in_pstack(bc);
-      return true;
-    }
-    else if(type == tEVEN) {
-      /* EVEN() = T*/
-      if(determined && value != true)
-	return false;
-      transform_into_constant(bc, true);
-      add_parents_in_pstack(bc);
-      return true;
-    }
-    else
-      assert(should_not_happen);
-  }
-
-  if(count_children() == 1) {
-    /* Needs simplification: ODD(x) == x and EVEN(x) = NOT(x) */
-    add_in_pstack(bc);
-  }
-
-  return true;
-}
-
-
-
-
-
-/**************************************************************************
- *
- * Simplifies [L,U](x,~x,y,z) to [L-1,U-1](y,z)
- * Returns false if an inconsistency is found (implying unsatisfiability)
- *
- **************************************************************************/
-
-bool Gate::remove_cardinality_g_not_g(BC *bc)
-{
-  if(type != tTHRESHOLD)
-    return true;
-
-  /* Clear temp fields of children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-    ca->child->temp = 0;
-    if(ca->child->type == tNOT)
-      ca->child->children->child->temp = 0;
-  }
-
-  for(ChildAssoc *ca = children; ca; ) {
-    Gate *child = ca->child;
-    if(child->temp == 2) {
-      /* child already seen in negative phase: simplify
-       * [L,U](~x,y,x,z) to [L-1,U-1](y,z) */
-      /* Reset temp fields */
-      child->temp = 0;
-      /* Remove the previous occurrence of ~child */
-      ChildAssoc *ca2 = children;
-      while(ca2 != ca) {
-	Gate * const child2 = ca2->child;
-	if(child2->type == tNOT && child2->children->child == child) {
-	  child2->temp = 0;
-	  delete ca2;
-	  if(!child2->parents)
-	    child2->add_in_pstack(bc);
- 	  break;
-	}
-	ca2 = ca2->next_child;
-      }
-      assert(ca2 != ca);
-      /* Remove child */
-      ChildAssoc *next_ca = ca->next_child;
-      delete ca;
-      ca = next_ca;
-      /* Update tmin and tmax */
-      if(tmax == 0) {
-	if(determined && value != false)
-	  return false;
-	transform_into_constant(bc, false);
-	add_parents_in_pstack(bc);
-	return true;
-      }
-      tmin = (tmin == 0)?0:tmin - 1;
-      tmax = tmax - 1;
-      continue;
-    }
-    if(child->temp == 1) {
-      /* To do: handle duplicate children of cardinality gates */
-      ;
-    }
-    /* Child not seen in either negative or positive phase */
-    child->temp = 1;
-
-    if(child->type == tNOT) {
-      Gate *grandchild = child->children->child;
-      if(grandchild->temp == 1) {
-	/* grandchild already seen in positive phase: simplify
-	 * [L,U](x,y,~x,z) to [L-1,U-1](y,z) */
-	/* Reset temp fields */
-	child->temp = 0;
-	grandchild->temp = 0;
-	/* Remove the previous occurrence of grandchild */
-	ChildAssoc *ca2 = children;
-	while(ca2 != ca) {
-	  if(ca2->child == grandchild) {
-	    delete ca2;
-	    break;
-	  }
-	  ca2 = ca2->next_child;
-	}
-	assert(ca2 != ca);
-	/* Remove child */
-	ChildAssoc *next_ca = ca->next_child;
-	delete ca;
-	ca = next_ca;
-	if(!child->parents)
-	  child->add_in_pstack(bc);
-	/* Update tmin and tmax */
-	if(tmax == 0) {
-	  if(determined && value != false)
-	    return false;
-	  transform_into_constant(bc, false);
-	  add_parents_in_pstack(bc);
-	  return true;
-	}
-	tmin = (tmin == 0)?0:tmin - 1;
-	tmax = tmax - 1;
-	continue;
-      }
-      grandchild->temp = 2;
-    }
-    ca = ca->next_child;
-    continue;
-  }
-
-  /* Clear temp fields of (remaining) children */
-  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-    ca->child->temp = 0;
-    if(ca->child->type == tNOT)
-      ca->child->children->child->temp = 0;
-  }
-
-#ifdef DEBUG_EXPENSIVE_CHECKS
-  for(Gate *g = bc->first_gate; g; g = g->next)
-    assert(g->temp == 0);
-#endif
-
-  return true;
-}
-
-
-
-
-
-/**************************************************************************
- *
  * Simplify the gate
  * Returns false if an inconsistency is derived (implying unsatisfiability)
  *
  **************************************************************************/
 
 bool
-Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
+Gate::simplify(BC* const bc, const SimplifyOptions& opts)
 {
   DEBUG_ASSERT(index != UINT_MAX);
   DEBUG_ASSERT(index < bc->index_to_gate.size());
   DEBUG_ASSERT(bc->index_to_gate[index] == this);
+
 
   if(type == tDELETED)
     return true;
  
   /* A limited cone of influence simplification:
    * remove gates that have no parents, no handles and are not determined */
-  if(!parents and !handles and !determined)
+  if(opts.use_coi and !parents and !handles and !determined)
     {
       add_children_in_pstack(bc);
       remove_all_children();
@@ -870,7 +485,6 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
       bc->changed = true;
       return true;
     }
-
 
   switch(type) {
   case tFALSE:
@@ -884,7 +498,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	value = false;
 	add_parents_in_pstack(bc);
       }
-      if(!handles && !parents)
+      if(!handles and !parents)
 	type = tDELETED;
       return true;
     }
@@ -900,7 +514,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	value = true;
 	add_parents_in_pstack(bc);
       }
-      if(!handles && !parents)
+      if(!handles and !parents)
 	type = tDELETED;
       return true;
     }
@@ -908,15 +522,17 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
   case tVAR:
     {
       DEBUG_ASSERT(!children);
-      if(determined && bc->may_transform_input_gates)
+      if(determined and opts.may_transform_input_gates)
 	transform_into_constant(bc, value);
       return true;
     }
 
   case tREF:
     {
-      DEBUG_ASSERT(count_children() == 1);
-      Gate * const child = children->child;
+      /* References are only used internally to simplify the implementation
+       * of some reductions; thus they are always removed here */
+      DEBUG_ASSERT(nof_children() == 1);
+      Gate* const child = first_child();
       if(determined) {
 	if(child->determined) {
 	  if(child->value != value)
@@ -936,8 +552,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	add_parents_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(!determined && !child->determined);
-      /* Unify this and child */
+      DEBUG_ASSERT(!determined and !child->determined);
       add_parents_in_pstack(bc);
       while(parents)
 	parents->change_child(child);
@@ -951,11 +566,11 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 
   case tNOT:
     {
-      DEBUG_ASSERT(count_children() == 1);
-      Gate * const child = children->child;
+      DEBUG_ASSERT(nof_children() == 1);
+      Gate* const child = first_child();
       if(determined) {
 	if(child->determined) {
-	  if(child->value == value)
+	  if(child->value != !value)
 	    return false;
 	} else {
 	  child->determined = true;
@@ -972,10 +587,9 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	add_parents_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(!determined && !child->determined);
+      DEBUG_ASSERT(!determined and !child->determined);
       if(child->type == tNOT) {
-	/* g := ~~h  --> g := h */
-	Gate * const grandchild = child->children->child;
+	Gate* const grandchild = child->first_child();
 	type = tREF;
 	remove_all_children();
 	if(!child->parents)
@@ -990,156 +604,198 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 
   case tITE:
     {
-      Gate *if_child = children->child;
-      Gate *then_child = children->next_child->child;
-      Gate *else_child = children->next_child->next_child->child;
-      if(if_child->determined && if_child->value == true) {
-	/* ITE(T,t,e) --> t */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tREF;
-	add_child(then_child);
-	add_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(if_child->determined && if_child->value == false) {
-	/* ITE(F,t,e) --> e */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tREF;
-	add_child(else_child);
-	add_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(then_child->determined && then_child->value == true) {
-	/* ITE(i,T,e) --> OR(i,e) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tOR;
-	add_child(if_child);
-	add_child(else_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(then_child->determined && then_child->value == false) {
-	/* ITE(i,F,e) --> AND(~i,e) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tAND;
-	Gate *new_not = bc->new_NOT(if_child);
-	add_child(new_not);
-	add_child(else_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(else_child->determined && else_child->value == true) {
-	/* ITE(i,t,T) --> OR(~i,t) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tOR;
-	Gate *new_not = bc->new_NOT(if_child);
-	add_child(new_not);
-	add_child(then_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(else_child->determined && else_child->value == false) {
-	/* ITE(i,t,F) --> AND(i,t) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tAND;
-	add_child(if_child);
-	add_child(then_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      DEBUG_ASSERT(!if_child->determined);
-      DEBUG_ASSERT(!then_child->determined);
-      DEBUG_ASSERT(!else_child->determined);
-      if(then_child == else_child) {
-	/* ITE(i,x,x) --> x */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tREF;
-	add_child(then_child);
-	add_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(if_child == then_child) {
-	/* ITE(x,x,e) --> OR(x,e) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tOR;
-	add_child(if_child);
-	add_child(else_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(if_child == else_child) {
-	/* ITE(x,t,x) --> AND(x,t) */
-	add_children_in_pstack(bc);
-	remove_all_children();
-	type = tAND;
-	add_child(if_child);
-	add_child(then_child);
-	add_in_pstack(bc);
-	add_parents_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(else_child->type == tNOT &&
-	 else_child->children->child == then_child) {
-	/* ITE(x,y,~y) --> EQUIV(x,y) */
-	remove_all_children();
-	if(!else_child->parents) else_child->add_in_pstack(bc);
-	type = tEQUIV;
-	add_child(if_child);
-	add_child(then_child);
-	add_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      if(then_child->type == tNOT &&
-	 then_child->children->child == else_child) {
-	/* ITE(x,~y,y) --> ODD(x,y) */
-	remove_all_children();
-	if(!then_child->parents) then_child->add_in_pstack(bc);
-	type = tODD;
-	add_child(if_child);
-	add_child(else_child);
-	add_in_pstack(bc);
-	bc->changed = true;
-	return true;
-      }
-      /*
-       * Possible extensions:
-       * ITE(i,AND(x,y,z),AND(x,v,w)) --> AND(x,ITE(i,AND(y,z),AND(v,w)))
-       * ITE(i,AND(x,y,z),AND(~x,v,w)) --> ITE(x,AND(i,y,z),AND(~i,v,w))
-       *  (read: i and x may be swapped! Of any use? )
-       */
+      DEBUG_ASSERT(nof_children() == 3);
+      Gate* const if_child = children->child;
+      Gate* const then_child = children->next_child->child;
+      Gate* const else_child = children->next_child->next_child->child;
+      if(opts.constant_folding)
+	{
+	  if(if_child->determined and if_child->value == true) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tREF;
+	    add_child(then_child);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(if_child->determined and if_child->value == false) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tREF;
+	    add_child(else_child);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(then_child->determined and then_child->value == true) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tOR;
+	    add_child(if_child);
+	    add_child(else_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(then_child->determined and then_child->value == false) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tAND;
+	    Gate *new_not = bc->new_NOT(if_child);
+	    add_child(new_not);
+	    add_child(else_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(else_child->determined and else_child->value == true) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tOR;
+	    Gate *new_not = bc->new_NOT(if_child);
+	    add_child(new_not);
+	    add_child(then_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(else_child->determined and else_child->value == false) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tAND;
+	    add_child(if_child);
+	    add_child(then_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	}
+      //DEBUG_ASSERT(!if_child->determined);
+      //DEBUG_ASSERT(!then_child->determined);
+      //DEBUG_ASSERT(!else_child->determined);
+      if(opts.remove_duplicate_children)
+	{
+	  if(if_child == then_child) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tOR;
+	    add_child(if_child);
+	    add_child(else_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(if_child == else_child) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tAND;
+	    add_child(if_child);
+	    add_child(then_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(then_child == else_child) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tREF;
+	    add_child(then_child);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	}
+      if(opts.remove_g_not_g_children)
+	{
+	  if(then_child->type == tNOT and
+	     if_child == then_child->first_child()) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tAND;
+	    add_child(then_child);
+	    add_child(else_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(if_child->type == tNOT and
+	     if_child->first_child() == then_child) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tAND;
+	    add_child(then_child);
+	    add_child(else_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(else_child->type == tNOT and
+	     if_child == else_child->first_child()) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tOR;
+	    add_child(else_child);
+	    add_child(then_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(if_child->type == tNOT and
+	     if_child->first_child() == else_child) {
+	    add_children_in_pstack(bc);
+	    remove_all_children();
+	    type = tOR;
+	    add_child(else_child);
+	    add_child(then_child);
+	    add_parents_in_pstack(bc);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(else_child->type == tNOT and
+	     else_child->first_child() == then_child) {
+	    remove_all_children();
+	    if(!else_child->parents) else_child->add_in_pstack(bc);
+	    type = tEQUIV;
+	    add_child(if_child);
+	    add_child(then_child);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	  if(then_child->type == tNOT and
+	     then_child->first_child() == else_child) {
+	    remove_all_children();
+	    if(!then_child->parents) then_child->add_in_pstack(bc);
+	    type = tODD;
+	    add_child(if_child);
+	    add_child(else_child);
+	    add_in_pstack(bc);
+	    bc->changed = true;
+	    return true;
+	  }
+	}
       return true;
     }
 
   case tOR:
     {
-      DEBUG_ASSERT(count_children() >= 1);
+      DEBUG_ASSERT(nof_children() >= 1);
 
-      if(determined && value == false) {
-	while(children) {
-	  Gate * const child = children->child;
+      if(opts.downward_bcp and determined and value == false) {
+	for(ChildAssoc* ci = children; ci; ) {
+	  Gate* const child = children->child;
+	  ChildAssoc* const next_ci = ci->next_child;
 	  if(child->determined) {
 	    if(child->value != false)
 	      return false;
@@ -1148,95 +804,96 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	    child->value = false;
 	    child->add_in_pstack(bc);
 	  }
-	  delete children;
+	  if(opts.constant_folding)
+	    delete ci;
+	  ci = next_ci;
 	}
-	transform_into_constant(bc, false);
-	add_parents_in_pstack(bc);
-	return true;
+	if(opts.constant_folding) {
+	  transform_into_constant(bc, false);
+	  add_parents_in_pstack(bc);
+	  return true;
+	}
       }
 
-      DEBUG_ASSERT(!determined || value == true);
-      bool true_found = false;
-      unsigned int nof_undet = 0;
-      for(ChildAssoc *ca = children; ca; ) {
-	ChildAssoc * const next_ca = ca->next_child;
-	Gate * const child = ca->child;
-	if(child->determined) {
-	  if(child->value == true) {
-	    true_found = true;
-	    break;
+      if(opts.constant_folding and (!determined or value == true)) {
+	bool true_found = false;
+	for(ChildAssoc* ci = children; ci; ) {
+	  ChildAssoc* const next_ci = ci->next_child;
+	  Gate* const child = ci->child;
+	  if(child->determined) {
+	    if(child->value == true) {
+	      true_found = true;
+	      break;
+	    }
+	    delete ci;
+	    if(!child->parents) child->add_in_pstack(bc);
 	  }
-	  delete ca;
-	  if(!child->parents) child->add_in_pstack(bc);
-	} else {
-	  nof_undet++;
+	  ci = next_ci;
 	}
-	ca = next_ca;
+	if(true_found) {
+	  transform_into_constant(bc, true);
+	  add_parents_in_pstack(bc);
+	  return true;
+	}
       }
-      if(true_found) {
-	transform_into_constant(bc, true);
-	add_parents_in_pstack(bc);
-	return true;
-      }
-      DEBUG_ASSERT(count_children() == nof_undet);
-      if(nof_undet == 0) {
-	/* All children were false */
-	if(determined && value != false)
+
+
+      if(nof_children() == 0) {
+	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(nof_undet == 1) {
-	/* All children except one were false */
+      if(nof_children() == 1) {
 	type = tREF;
 	add_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(count_children() >= 2);
-      if(!remove_g_not_g_and_duplicate_children(bc))
+
+      DEBUG_ASSERT(nof_children() >= 2);
+      if(!remove_duplicate_and_g_not_g_children(bc,
+						opts.remove_duplicate_children,
+						opts.remove_g_not_g_children))
 	return false;
-      /* Note: if more simplifications are inserted here, check that
-	 the type is still OR! */
 
       if(type != tOR)
 	return true;
 
-      const bool or_share = true;
-      if(or_share && count_children() >= 3) {
+      const bool or_share = false;
+      if(or_share and nof_children() >= 3) {
 #ifdef DEBUG_EXPENSIVE_CHECKS
 	for(Gate *g = bc->first_gate; g; g = g->next)
 	  assert(g->temp == 0);
 #endif
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 1;
+	for(const ChildAssoc *ci = children; ci; ci = ci->next_child)
+	  ci->child->temp = 1;
 	
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	  Gate * const child = ca->child;
+	for(ChildAssoc* ci = children; ci; ci = ci->next_child) {
+	  Gate * const child = ci->child;
 	  for(ChildAssoc *fa = child->parents; fa; ) {
-	    Gate * const parent = fa->parent;
-	    ChildAssoc *next_fa = fa->next_parent;
-	    while(next_fa && next_fa->parent == parent)
+	    Gate* const parent = fa->parent;
+	    ChildAssoc* next_fa = fa->next_parent;
+	    while(next_fa and next_fa->parent == parent)
 	      next_fa = next_fa->next_parent;
-	    if(parent != this && parent->type == tOR &&
-	       (parent->determined || parent->parents)) {
+	    if(parent != this and parent->type == tOR and
+	       (parent->determined or parent->parents)) {
 	      bool all_same = true;
 	      unsigned int nof_children = 0;
-	      for(ChildAssoc *fca = parent->children; fca; fca=fca->next_child) {
+	      for(ChildAssoc* fca = parent->children; fca; fca=fca->next_child) {
 		if(fca->child->temp != 1) {
 		  all_same = false;
 		  break;
 		}
 		nof_children++;
 	      }
-	      if(all_same && nof_children > 1 &&
+	      if(all_same and nof_children > 1 and
 		 nof_children < count_children()) {
-		/* OR(x,y,z,v),t=OR(y,z) ==> OR(x,t,v) */
 		for(ChildAssoc *fca = parent->children; fca;
 		    fca = fca->next_child)
 		  fca->child->temp = 0;
-		for(ChildAssoc *ca2 = children; ca2; ) {
-		  ChildAssoc *next_ca2 = ca2->next_child;
+		for(ChildAssoc* ca2 = children; ca2; ) {
+		  ChildAssoc* const next_ca2 = ca2->next_child;
 		  if(ca2->child->temp == 0)
 		    delete ca2;
 		  ca2 = next_ca2;
@@ -1250,54 +907,50 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	}
       done:
 
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 0;
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  ci->child->temp = 0;
 #ifdef DEBUG_EXPENSIVE_CHECKS
-	for(Gate *g = bc->first_gate; g; g = g->next)
+	for(Gate* g = bc->first_gate; g; g = g->next)
 	  assert(g->temp == 0);
 #endif
       }
 
-
-      const bool collapse = true;
-      const bool collapse_shared = false;
-      if(collapse) {
-	/* Collapse some nested ORs */
-	bool collapsed = false;
+      if(opts.absorb_children != SimplifyOptions::CHILDABSORB_NONE) {
+	bool absorbed = false;
 	for(ChildAssoc *ca = children; ca; ) {
-	  Gate * const child = ca->child;
-	  if(child->type == tOR && !child->determined && 
-	     (collapse_shared || child->parents->next_parent == 0)) {
-	    /* OR(x,OR(t,u,v),y) = OR(x,t,u,v,y) */
-	    collapsed = true;
-	    for(ChildAssoc *gca = child->children; gca;
+	  Gate* const child = ca->child;
+	  if(child->type == tOR and !child->determined and
+	     (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+	      !child->has_many_parents())) {
+	    absorbed = true;
+	    for(const ChildAssoc* gca = child->children; gca;
 		gca = gca->next_child)
 	      add_child(gca->child);
-	    ChildAssoc *next_ca = ca->next_child;
+	    ChildAssoc* next_ca = ca->next_child;
 	    delete ca;
 	    ca = next_ca;
-	    child->add_in_pstack(bc);
+	    if(!child->parents) child->add_in_pstack(bc);
 	    continue;
 	  }
 	  ca = ca->next_child;
 	}
-	if(collapsed) {
+	if(absorbed) {
 	  add_in_pstack(bc);
 	  return true;
 	}
       }
-
 
       return true;
     }
 
   case tAND:
     {
-      DEBUG_ASSERT(count_children() >= 1);
+      DEBUG_ASSERT(nof_children() >= 1);
 
-      if(determined && value == true) {
-	while(children) {
-	  Gate * const child = children->child;
+      if(opts.downward_bcp and determined and value == true) {
+	for(ChildAssoc* ci = children; ci; ) {
+	  Gate* const child = children->child;
+	  ChildAssoc* const next_ci = ci->next_child;
 	  if(child->determined) {
 	    if(child->value != true)
 	      return false;
@@ -1306,140 +959,216 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	    child->value = true;
 	    child->add_in_pstack(bc);
 	  }
-	  delete children;
+	  if(opts.constant_folding)
+	    delete ci;
+	  ci = next_ci;
 	}
-	transform_into_constant(bc, true);
-	add_parents_in_pstack(bc);
-	return true;
+	if(opts.constant_folding) {
+	  transform_into_constant(bc, true);
+	  add_parents_in_pstack(bc);
+	  return true;
+	}
       }
 
-      DEBUG_ASSERT(!determined || value == false);
-      bool false_found = false;
-      unsigned int nof_undet = 0;
-      for(ChildAssoc *ca = children; ca; ) {
-	ChildAssoc * const next_ca = ca->next_child;
-	Gate * const child = ca->child;
-	if(child->determined) {
-	  if(child->value == false) {
-	    false_found = true;
-	    break;
+      if(opts.constant_folding and (!determined or value == false)) {
+	bool false_found = false;
+	for(ChildAssoc* ci = children; ci; ) {
+	  ChildAssoc* const next_ci = ci->next_child;
+	  Gate* const child = ci->child;
+	  if(child->determined) {
+	    if(child->value == false) {
+	      false_found = true;
+	      break;
+	    }
+	    delete ci;
+	    if(!child->parents) child->add_in_pstack(bc);
 	  }
-	  delete ca;
-	  if(!child->parents) child->add_in_pstack(bc);
-	} else {
-	  nof_undet++;
+	  ci = next_ci;
 	}
-	ca = next_ca;
+	if(false_found) {
+	  transform_into_constant(bc, false);
+	  add_parents_in_pstack(bc);
+	  return true;
+	}
       }
-      if(false_found) {
-	transform_into_constant(bc, false);
-	add_parents_in_pstack(bc);
-	return true;
-      }
-      DEBUG_ASSERT(count_children() == nof_undet);
-      if(nof_undet == 0) {
-	/* All children were true */
-	if(determined && value != true)
+
+
+      if(nof_children() == 0) {
+	if(determined and value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(nof_undet == 1) {
-	/* All children except one were false */
+      if(nof_children() == 1) {
 	type = tREF;
 	add_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(count_children() >= 2);
-      if(!remove_g_not_g_and_duplicate_children(bc))
+
+      DEBUG_ASSERT(nof_children() >= 2);
+      if(!remove_duplicate_and_g_not_g_children(bc,
+						opts.remove_duplicate_children,
+						opts.remove_g_not_g_children))
 	return false;
-      /* Note: if more simplifications are inserted here, check that
-	 the type is still AND! */
 
       if(type != tAND)
 	return true;
 
-      const bool and_share = true;
-      if(and_share && count_children() >= 3) {
+#ifdef OLD
+      const bool and_share = false;
+      if(and_share and nof_children() >= 3) {
 #ifdef DEBUG_EXPENSIVE_CHECKS
-	for(Gate *g = bc->first_gate; g; g = g->next)
+	for(const Gate* g = bc->first_gate; g; g = g->next)
 	  assert(g->temp == 0);
 #endif
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 1;
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  ci->child->temp = 1;
 	
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	  Gate * const child = ca->child;
-	  for(ChildAssoc *fa = child->parents; fa; ) {
-	    Gate * const parent = fa->parent;
-	    ChildAssoc *next_fa = fa->next_parent;
-	    while(next_fa && next_fa->parent == parent)
-	      next_fa = next_fa->next_parent;
-	    if(parent != this && parent->type == tAND &&
-	       (parent->determined || parent->parents)) {
-	      bool all_same = true;
-	      unsigned int nof_children = 0;
-	      for(ChildAssoc *fca = parent->children; fca;
-		  fca = fca->next_child) {
-		if(fca->child->temp != 1) {
-		  all_same = false;
-		  break;
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  {
+	    Gate* const child = ci->child;
+	    for(const ChildAssoc* opi = child->parents; opi; ) {
+	      Gate* const other_parent = opi->parent;
+	      const ChildAssoc* next_opi = opi->next_parent;
+	      while(next_opi and next_opi->parent == other_parent)
+		next_opi = next_opi->next_parent;
+	      if(other_parent != this and other_parent->type == tAND and
+		 (other_parent->determined or other_parent->parents))
+		{
+		  bool all_same = true;
+		  unsigned int nof_children = 0;
+		  for(const ChildAssoc* oci = other_parent->children; oci;
+		      oci = oci->next_child) {
+		    if(oci->child->temp != 1) {
+		      all_same = false;
+		      break;
+		    }
+		    nof_children++;
+		  }
+		  if(all_same and nof_children > 1 and
+		     nof_children < count_children())
+		    {
+		      for(const ChildAssoc* oci = other_parent->children; oci;
+			  oci = oci->next_child)
+			oci->child->temp = 0;
+		      for(ChildAssoc* ci2 = children; ci2; ) {
+			ChildAssoc* next_ci2 = ci2->next_child;
+			if(ci2->child->temp == 0)
+			  delete ci2;
+			ci2 = next_ci2;
+		      }
+		      add_child(other_parent);
+		      goto done_and;
+		    }
 		}
-		nof_children++;
-	      }
-	      if(all_same && nof_children > 1 &&
-		 nof_children < count_children()) {
-		/* AND(x,y,z,v),t=AND(y,z) ==> AND(x,t,v) */
-		for(ChildAssoc *fca = parent->children; fca;
-		    fca = fca->next_child)
-		  fca->child->temp = 0;
-		for(ChildAssoc *ca2 = children; ca2; ) {
-		  ChildAssoc *next_ca2 = ca2->next_child;
-		  if(ca2->child->temp == 0)
-		    delete ca2;
-		  ca2 = next_ca2;
-		}
-		add_child(parent);
-		goto done_and;
-	      }
+	      opi = next_opi;
 	    }
-	    fa = next_fa;
 	  }
-	}
       done_and:
-
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 0;
+	
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  ci->child->temp = 0;
 #ifdef DEBUG_EXPENSIVE_CHECKS
-	for(Gate *g = bc->first_gate; g; g = g->next)
+	for(const Gate* g = bc->first_gate; g; g = g->next)
 	  assert(g->temp == 0);
 #endif
       }
+#else //~OLD
+      /* BROKEN, DO NOT USE! */
+      const bool and_share = false;
+      if(and_share and nof_children() >= 3) {
+#ifdef DEBUG_EXPENSIVE_CHECKS
+	for(const Gate* g = bc->first_gate; g; g = g->next)
+	  assert(g->temp == 0);
+#endif
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  ci->child->temp = 1;
+	
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	  {
+	    Gate* const child = ci->child;
+	    for(const ChildAssoc* opi = child->parents;
+		opi;
+		opi = opi->next_parent) {
+	      Gate* const other_parent = opi->parent;
+	      if(other_parent != this and
+		 other_parent->type == tAND and
+		 other_parent->nof_children() >= 2 and
+		 other_parent->nof_children() < nof_children() and
+		 (other_parent->determined or other_parent->parents))
+		{
+		  other_parent->temp += 2;
+		  DEBUG_ASSERT((unsigned int)other_parent->temp / 2 <=
+			       other_parent->nof_children());
+		  if((unsigned int)other_parent->temp/2 ==
+		     other_parent->nof_children()) {
+		    for(const ChildAssoc* ci2 = children; ci2;
+			ci2 = ci2->next_child) {
+		      Gate* const child2 = ci->child;
+		      child2->temp = 0;
+		      for(const ChildAssoc* opi2 = child->parents; opi2;
+			  opi2 = opi2->next_parent)
+			opi2->parent->temp = 0;
+		      if(ci2 == ci)
+			break;
+		    }
+		    for(const ChildAssoc* oci = other_parent->children; oci;
+			oci = oci->next_child)
+		      oci->child->temp = 1;
+		    for(ChildAssoc* ci2 = children; ci2; ) {
+		      ChildAssoc* next_ci2 = ci2->next_child;
+		      if(ci2->child->temp == 1)
+			delete ci2;
+		      ci2 = next_ci2;
+		    }
+		    add_child(other_parent);
+		    for(const ChildAssoc* oci = other_parent->children; oci;
+			oci = oci->next_child)
+		      oci->child->temp = 0;
+		    goto done_and;
+		  }
+		}
+	    }
+	  }
+	for(const ChildAssoc* ci = children; ci; ci = ci->next_child) {
+	  Gate* const child = ci->child;
+	  child->temp = 0;
+	  for(const ChildAssoc* opi = child->parents; opi;
+	      opi = opi->next_parent) {
+	    Gate* const other_parent = opi->parent;
+	    other_parent->temp = 0;
+	  }
+	}
+      done_and:
+	;
+#ifdef DEBUG_EXPENSIVE_CHECKS
+	for(const Gate* g = bc->first_gate; g; g = g->next)
+	  assert(g->temp == 0);
+#endif
+      }
+#endif //ifdef OLD
 
-      const bool collapse = true;
-      const bool collapse_shared = false;
-      if(collapse) {
-	/* Collapse some nested ANDs */
-	bool collapsed = false;
+      if(opts.absorb_children != SimplifyOptions::CHILDABSORB_NONE) {
+	bool absorbed = false;
 	for(ChildAssoc *ca = children; ca; ) {
 	  Gate * const child = ca->child;
-	  if(child->type == tAND && !child->determined &&
-	     (collapse_shared || child->parents->next_parent == 0)) {
-	    /* AND(x,AND(t,u,v),y) = AND(x,t,u,v,y) */
-	    collapsed = true;
+	  if(child->type == tAND and !child->determined and
+	     (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+	      !child->has_many_parents())) {
+	    absorbed = true;
 	    for(ChildAssoc *gca = child->children; gca;
 		gca = gca->next_child)
 	      add_child(gca->child);
 	    ChildAssoc *next_ca = ca->next_child;
 	    delete ca;
 	    ca = next_ca;
-	    child->add_in_pstack(bc);
+	    if(!child->parents) child->add_in_pstack(bc);
 	    continue;
 	  }
 	  ca = ca->next_child;
 	}
-	if(collapsed) {
+	if(absorbed) {
 	  add_in_pstack(bc);
 	  return true;
 	}
@@ -1451,77 +1180,66 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
   case tODD:
   case tEVEN:
     {
-      unsigned int nof_undet = 0;
-
-      for(ChildAssoc *ca = children; ca; ) {
-	Gate * const child = ca->child;
+      for(ChildAssoc* ci = children; ci; ) {
+	Gate* const child = ci->child;
 	if(!child->determined) {
-	  nof_undet++;
-	  ca = ca->next_child;
+	  ci = ci->next_child;
 	  continue;
 	}
-	/* Remove determined children by using the equations
-	 * ODD(F,x,y) = ODD(x,y), ODD(T,x,y) = EVEN(x,y),
-	 * EVEN(F,x,y) = EVEN(x,y), and EVEN(T,x,y) = ODD(x,y) */
 	if(child->value == true) {
+	  /* Swap type */
 	  if(type == tODD) type = tEVEN;
 	  else if(type == tEVEN) type = tODD;
-	  else assert(should_not_happen);
+	  else _should_not_happen();
 	}
-	ChildAssoc *next_ca = ca->next_child;
-	delete ca;
-	ca = next_ca;
-	if(!child->parents)
+	/* Remove child */
+	ChildAssoc* const next_ci = ci->next_child;
+	delete ci;
+	ci = next_ci;
+	if(!child->has_parents())
 	  child->add_in_pstack(bc);
       }
-      if(nof_undet == 0) {
-	if(type == tODD) {
-	  /* ODD() = F */
-	  if(determined && value != false)
-	    return false;
-	  transform_into_constant(bc, false);
-	  add_parents_in_pstack(bc);
-	  return true;
-	} else if(type == tEVEN) {
-	  /* EVEN() = T */
-	  if(determined && value != true)
-	    return false;
-	  transform_into_constant(bc, true);
-	  add_parents_in_pstack(bc);
-	  return true;
+      if(nof_children() == 0)
+	{
+	  if(type == tODD) {
+	    if(determined and value != false)
+	      return false;
+	    transform_into_constant(bc, false);
+	    add_parents_in_pstack(bc);
+	    return true;
+	  }
+	  else if(type == tEVEN) {
+	    if(determined and value != true)
+	      return false;
+	    transform_into_constant(bc, true);
+	    add_parents_in_pstack(bc);
+	    return true;
+	  }
+	  _should_not_happen();
 	}
-	assert(should_not_happen);
-      }
-      if(nof_undet == 1) {
+      if(nof_children() == 1) {
 	if(type == tODD) {
-	  /* ODD(x) = x */
 	  type = tREF;
 	} else if(type == tEVEN) {
-	  /* EVEN(x) = x */
 	  type = tNOT;
 	  add_parents_in_pstack(bc);
 	} else 
-	  assert(should_not_happen);
+	  _should_not_happen();
 	add_in_pstack(bc);
 	return true;
       }
 
-      DEBUG_ASSERT(nof_undet == count_children());
-      DEBUG_ASSERT(nof_undet >= 2);
+      DEBUG_ASSERT(nof_children() >= 2);
 
-      /*
-       * "Absorb" negations by using the equations
-       * ODD(NOT(x),...) = EVEN(x,...) and EVEN(NOT(x),...) = ODD(x,...)
-       */
       bool has_determined_children = false;
       for(ChildAssoc *ca = children; ca; ) {
-	Gate * const child = ca->child;
+	Gate* const child = ca->child;
 	if(child->type == tNOT) {
-	  Gate * const grandchild = child->children->child;
+	  Gate* const grandchild = child->first_child();
 	  ca->change_child(grandchild);
 	  if(grandchild->determined)
 	    has_determined_children = true;
-	  if(!child->parents)
+	  if(!child->has_parents())
 	    child->add_in_pstack(bc);
 	  if(type == tODD) type = tEVEN;
 	  else if(type == tEVEN) type = tODD;
@@ -1531,240 +1249,230 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
       }
       if(has_determined_children)
 	{
-	  /* Restart, latter simplifications assume undetermined children */
 	  add_in_pstack(bc);
 	  return true;
 	}
 
 
-      /*
-       * Remove duplicate children
-       */
-      if(!remove_parity_duplicate_children(bc))
+      if(!remove_duplicate_and_g_not_g_children(bc, opts.remove_duplicate_children, opts.remove_g_not_g_children))
 	return false;
       if(in_pstack)
 	return true;
-      if(!(type == tODD || type == tEVEN))
+      if(!(type == tODD or type == tEVEN))
 	return true;
-
-      nof_undet = count_children();
-      assert(nof_undet >= 2);
       
-      if((type == tEVEN && nof_undet == 2 && determined && value == true) ||
-	 (type == tODD && nof_undet == 2 && determined && value == false))
+      DEBUG_ASSERT(nof_children() >= 2);
+
+      /*
+       * Inline equivalences
+       */
+      if(opts.inline_equivalences) 
 	{
-	  /* EVEN(x,y) = T and ODD(x,y) = F
-	     imply that the two children are equivalent */
-	  Gate *child1 = children->child;
-	  Gate *child2 = children->next_child->child;
-	  if(child1 == child2) {
-	    transform_into_constant(bc, value);
-	    add_parents_in_pstack(bc);
-	    return true;
-	  }
-	  if(bc->may_transform_input_gates) {
-	    if(child1->type == tVAR && !bc->depends_on(child2, child1)) {
-	      /* child1 is an input gate and child2 does not depend on it ==>
-		 make child1 equivalent to child2 */
-	      transform_into_constant(bc, value);
-	      add_parents_in_pstack(bc);
-	      DEBUG_ASSERT(!child1->determined && !child2->determined);
-	      child1->type = tREF;
-	      child1->add_child(child2);
-	      child1->add_in_pstack(bc);
-	      return true;
-	    }
-	    if(child2->type == tVAR && !bc->depends_on(child1, child2)) {
-	      /* child2 is an input gate and child1 does not depend on it ==>
-		 make child2 equivalent to child1 */
-	      transform_into_constant(bc, value);
-	      add_parents_in_pstack(bc);
-	      DEBUG_ASSERT(!child1->determined && !child2->determined);
-	      child2->type = tREF;
-	      child2->add_child(child1);
-	      child2->add_in_pstack(bc);
-	      return true;
-	    }
-	  }
-	  if(child1->parents->next_parent && child2->parents->next_parent) {
-	    /* Both children have at least one parent other than this */
-	    if(!bc->depends_on(child1, child2)) {
-	      /* Move the edges to child2 to point to child1 instead */
-	      for(ChildAssoc *fa = child2->parents; fa; ) {
-		ChildAssoc *next_fa = fa->next_parent;
-		if(fa->parent != this)
-		  fa->change_child(child1);
-		fa = next_fa;
+	  if(determined and nof_children() == 2 and
+	     ((type == tEVEN and value == true) or
+	      (type == tODD and value == false)))
+	    {
+	      Gate* child1 = children->child;
+	      Gate* child2 = children->next_child->child;
+	      if(child1 == child2) {
+		transform_into_constant(bc, value);
+		add_parents_in_pstack(bc);
+		return true;
 	      }
-	      child1->add_parents_in_pstack(bc);
-	    } else {
-	      DEBUG_ASSERT(!bc->depends_on(child2, child1));
-	      /* Move the edges to child1 to point to child2 instead */
-	      for(ChildAssoc *fa = child1->parents; fa; ) {
-		ChildAssoc *next_fa = fa->next_parent;
-		if(fa->parent != this)
-		  fa->change_child(child2);
-		fa = next_fa;
+	      if(bc->may_transform_input_gates) {
+		if(child1->type == tVAR && !bc->depends_on(child2, child1)) {
+		  /* child1 is an input gate and child2 does not depend on it ==>
+		     make child1 equivalent to child2 */
+		  transform_into_constant(bc, value);
+		  add_parents_in_pstack(bc);
+		  DEBUG_ASSERT(!child1->determined && !child2->determined);
+		  child1->type = tREF;
+		  child1->add_child(child2);
+		  child1->add_in_pstack(bc);
+		  return true;
+		}
+		if(child2->type == tVAR && !bc->depends_on(child1, child2)) {
+		  /* child2 is an input gate and child1 does not depend on it ==>
+		     make child2 equivalent to child1 */
+		  transform_into_constant(bc, value);
+		  add_parents_in_pstack(bc);
+		  DEBUG_ASSERT(!child1->determined && !child2->determined);
+		  child2->type = tREF;
+		  child2->add_child(child1);
+		  child2->add_in_pstack(bc);
+		  return true;
+		}
 	      }
-	      child2->add_parents_in_pstack(bc);
+	      if(child1->has_many_parents() and child2->has_many_parents()) {
+		if(!bc->depends_on(child1, child2)) {
+		  for(ChildAssoc *fa = child2->parents; fa; ) {
+		    ChildAssoc *next_fa = fa->next_parent;
+		    if(fa->parent != this)
+		      fa->change_child(child1);
+		    fa = next_fa;
+		  }
+		  child1->add_parents_in_pstack(bc);
+		} else {
+		  DEBUG_ASSERT(!bc->depends_on(child2, child1));
+		  for(ChildAssoc *fa = child1->parents; fa; ) {
+		    ChildAssoc *next_fa = fa->next_parent;
+		    if(fa->parent != this)
+		      fa->change_child(child2);
+		    fa = next_fa;
+		  }
+		  child2->add_parents_in_pstack(bc);
+		}
+		//return true;
+	      }
+	      //return true;
 	    }
-	    //return true;
-	  }
-	  //return true;
+	  
+	  if(determined and nof_children() == 2 and
+	     ((type == tEVEN and value == false) or
+	      (type == tODD and value == true)))
+	    {
+	      Gate *child1 = children->child;
+	      Gate *child2 = children->next_child->child;
+	      if(child1 == child2)
+		return false;
+	      if(bc->may_transform_input_gates) {
+		if(child1->type == tVAR && !bc->depends_on(child2, child1)) {
+		  transform_into_constant(bc, value);
+		  add_parents_in_pstack(bc);
+		  DEBUG_ASSERT(!child1->determined && !child2->determined);
+		  child1->type = tNOT;
+		  child1->add_child(child2);
+		  child1->add_parents_in_pstack(bc);
+		  child1->add_in_pstack(bc);
+		  return true;
+		}
+		if(child2->type == tVAR && !bc->depends_on(child1, child2)) {
+		  transform_into_constant(bc, value);
+		  add_parents_in_pstack(bc);
+		  DEBUG_ASSERT(!child1->determined && !child2->determined);
+		  child2->type = tNOT;
+		  child2->add_child(child1);
+		  child2->add_parents_in_pstack(bc);
+		  child2->add_in_pstack(bc);
+		  return true;
+		}
+	      }
+	      if(child1->has_many_parents() and child2->has_many_parents()) {
+		if(child1->type == tVAR || !bc->depends_on(child1, child2)) {
+		  Gate *new_not = new Gate(tNOT, child1);
+		  bc->install_gate(new_not);
+		  for(ChildAssoc *fa = child2->parents; fa; ) {
+		    ChildAssoc *next_fa = fa->next_parent;
+		    if(fa->parent != this)
+		      fa->change_child(new_not);
+		    fa = next_fa;
+		  }
+		  new_not->add_parents_in_pstack(bc);
+		  new_not->add_in_pstack(bc);
+		} else {
+		  DEBUG_ASSERT(!bc->depends_on(child2, child1));
+		  Gate *new_not = new Gate(tNOT, child2);
+		  bc->install_gate(new_not);
+		  for(ChildAssoc *fa = child1->parents; fa; ) {
+		    ChildAssoc *next_fa = fa->next_parent;
+		    if(fa->parent != this)
+		      fa->change_child(new_not);
+		    fa = next_fa;
+		  }
+		  new_not->add_parents_in_pstack(bc);
+		  new_not->add_in_pstack(bc);
+		}
+		//return true;
+	      }
+	      //return true;
+	    }
 	}
 
-      if((type == tEVEN && nof_undet == 2 && determined && value == false) ||
-	 (type == tODD && nof_undet == 2 && determined && value == true))
+      if(opts.misc_reductions)
 	{
-	  /* EVEN(x,y) = F and ODD(x,y) = T
-	     imply that the two children are inequivalent */
-	  Gate *child1 = children->child;
-	  Gate *child2 = children->next_child->child;
-	  if(child1 == child2)
-	    return false;
-	  if(bc->may_transform_input_gates) {
-	    if(child1->type == tVAR && !bc->depends_on(child2, child1)) {
-	      /* Change child1 to NOT(child2) */
-	      transform_into_constant(bc, value);
-	      add_parents_in_pstack(bc);
-	      DEBUG_ASSERT(!child1->determined && !child2->determined);
-	      child1->type = tNOT;
-	      child1->add_child(child2);
-	      child1->add_parents_in_pstack(bc);
-	      child1->add_in_pstack(bc);
-	      return true;
-	    }
-	    if(child2->type == tVAR && !bc->depends_on(child1, child2)) {
-	      /* Change child2 to NOT(child1) */
-	      transform_into_constant(bc, value);
-	      add_parents_in_pstack(bc);
-	      DEBUG_ASSERT(!child1->determined && !child2->determined);
-	      child2->type = tNOT;
-	      child2->add_child(child1);
-	      child2->add_parents_in_pstack(bc);
-	      child2->add_in_pstack(bc);
-	      return true;
-	    }
-	  }
-	  if(child1->parents->next_parent && child2->parents->next_parent) {
-	    /* Both children have at least one parent other than this */
-	    if(child1->type == tVAR || !bc->depends_on(child1, child2)) {
-	      /* Move the edges to child2 to point to NOT(child1) instead */
-	      Gate *new_not = new Gate(tNOT, child1);
-	      bc->install_gate(new_not);
-	      for(ChildAssoc *fa = child2->parents; fa; ) {
-		ChildAssoc *next_fa = fa->next_parent;
-		if(fa->parent != this)
-		  fa->change_child(new_not);
-		fa = next_fa;
+	  if(type == tODD and nof_children() == 2) {
+	    Gate* child1 = children->child;
+	    Gate* child2 = children->next_child->child;
+	    if(child2->type == tOR and !child2->has_many_parents()) {
+	      bool found = false;
+	      for(ChildAssoc *ca = child2->children; ca; ca = ca->next_child) {
+		if(ca->child == child1) {
+		  found = true;
+		  break;
+		}
 	      }
-	      new_not->add_parents_in_pstack(bc);
-	      new_not->add_in_pstack(bc);
-	    } else {
-	      DEBUG_ASSERT(!bc->depends_on(child2, child1));
-	      /* Move the edges to child1 to point to NOT(child2) instead */
-	      Gate *new_not = new Gate(tNOT, child2);
-	      bc->install_gate(new_not);
-	      for(ChildAssoc *fa = child1->parents; fa; ) {
-		ChildAssoc *next_fa = fa->next_parent;
-		if(fa->parent != this)
-		  fa->change_child(new_not);
-		fa = next_fa;
+	      if(found) {
+		Gate *new_or = new Gate(tOR); bc->install_gate(new_or);
+		for(ChildAssoc *ca = child2->children; ca; ca = ca->next_child)
+		  if(ca->child != child1)
+		    new_or->add_child(ca->child);
+		remove_all_children();
+		if(!child2->parents) child2->add_in_pstack(bc);
+		Gate *new_not = new Gate(tNOT, child1); bc->install_gate(new_not);
+		type = tAND;
+		add_child(new_not);
+		add_child(new_or);
+		add_in_pstack(bc);
+		new_not->add_in_pstack(bc);
+		new_or->add_in_pstack(bc);
+		return true;
 	      }
-	      new_not->add_parents_in_pstack(bc);
-	      new_not->add_in_pstack(bc);
 	    }
-	    //return true;
-	  }
-	  //return true;
-	}
-      if(type == tODD && count_children() == 2) {
-	Gate *child1 = children->child;
-	Gate *child2 = children->next_child->child;
-	assert(!child1->determined);
-	assert(!child2->determined);
-	/* ODD(x, OR(x,y,z)) == ~x & OR(y,z)
-	   used only if OR(x,y,z) has no other parents */
-	if(child2->type == tOR && child2->parents->next_parent == 0) {
-	  bool found = false;
-	  for(ChildAssoc *ca = child2->children; ca; ca = ca->next_child) {
-	    if(ca->child == child1) {
-	      found = true;
-	      break;
+	    else if(child1->type == tOR and !child1->has_many_parents()) {
+	      bool found = false;
+	      for(ChildAssoc *ca = child1->children; ca; ca = ca->next_child) {
+		if(ca->child == child2) {
+		  found = true;
+		  break;
+		}
+	      }
+	      if(found) {
+		Gate *new_or = new Gate(tOR); bc->install_gate(new_or);
+		for(ChildAssoc *ca = child1->children; ca; ca = ca->next_child)
+		  if(ca->child != child2)
+		    new_or->add_child(ca->child);
+		remove_all_children();
+		if(!child1->parents) child1->add_in_pstack(bc);
+		Gate *new_not = new Gate(tNOT, child2); bc->install_gate(new_not);
+		type = tAND;
+		add_child(new_not);
+		add_child(new_or);
+		add_in_pstack(bc);
+		new_not->add_in_pstack(bc);
+		new_or->add_in_pstack(bc);
+		return true;
+	      }
 	    }
-	  }
-	  if(found) {
-	    Gate *new_or = new Gate(tOR); bc->install_gate(new_or);
-	    for(ChildAssoc *ca = child2->children; ca; ca = ca->next_child)
-	      if(ca->child != child1)
-		new_or->add_child(ca->child);
-	    remove_all_children();
-	    if(!child2->parents) child2->add_in_pstack(bc);
-	    Gate *new_not = new Gate(tNOT, child1); bc->install_gate(new_not);
-	    type = tAND;
-	    add_child(new_not);
-	    add_child(new_or);
-	    add_in_pstack(bc);
-	    new_not->add_in_pstack(bc);
-	    new_or->add_in_pstack(bc);
-	    return true;
-	  }
-	} else if(child1->type == tOR && child1->parents->next_parent == 0) {
-	  bool found = false;
-	  for(ChildAssoc *ca = child1->children; ca; ca = ca->next_child) {
-	    if(ca->child == child2) {
-	      found = true;
-	      break;
-	    }
-	  }
-	  if(found) {
-	    Gate *new_or = new Gate(tOR); bc->install_gate(new_or);
-	    for(ChildAssoc *ca = child1->children; ca; ca = ca->next_child)
-	      if(ca->child != child2)
-		new_or->add_child(ca->child);
-	    remove_all_children();
-	    if(!child1->parents) child1->add_in_pstack(bc);
-	    Gate *new_not = new Gate(tNOT, child2); bc->install_gate(new_not);
-	    type = tAND;
-	    add_child(new_not);
-	    add_child(new_or);
-	    add_in_pstack(bc);
-	    new_not->add_in_pstack(bc);
-	    new_or->add_in_pstack(bc);
-	    return true;
 	  }
 	}
-      }
 
-      if(!(type == tODD || type == tEVEN))
+      if(!(type == tODD or type == tEVEN))
 	return true;
 
-      const bool collapse = false;  /* Incompatible with CNF normalization! */
-      const bool collapse_shared = false;
-      if(collapse && !opt_preserve_cnf_normalized_form) {
-	/* Collapse some nested ODDs */
+      /* Incompatible with CNF normalization! */
+      if(opts.absorb_children != SimplifyOptions::CHILDABSORB_NONE and
+	 !opts.preserve_cnf_normalized_form) {
 	if(type == tODD) {
-	  bool collapsed = false;
+	  bool absorbed = false;
 	  for(ChildAssoc *ca = children; ca; ) {
 	    Gate * const child = ca->child;
-	    if(child->type == tODD &&
-	       (collapse_shared || child->parents->next_parent == 0)) {
-	      /* ODD(x,ODD(t,u,v),y) = ODD(x,t,u,v,y) */
-	      collapsed = true;
+	    if(child->type == tODD and
+	       (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+		!child->has_many_parents())) {
+	      absorbed = true;
 	      for(ChildAssoc *gca = child->children; gca;
 		  gca = gca->next_child)
 		add_child(gca->child);
 	      ChildAssoc *next_ca = ca->next_child;
 	      delete ca;
 	      ca = next_ca;
-	      child->add_in_pstack(bc);
+	      if(!child->parents) child->add_in_pstack(bc);
 	      continue;
 	    }
-	    if(child->type == tEVEN &&
-	       (collapse_shared || child->parents->next_parent == 0)) {
-	      /* ODD(x,EVEN(t,u,v),y) = ODD(x,~ODD(t,u,v),y) =
-	       * ODD(x,ODD(~t,u,v),y) = ODD(x,~t,u,v,y) = EVEN(x,t,u,v,y) */
-	      collapsed = true;
+	    if(child->type == tEVEN and
+	       (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+		!child->has_many_parents())) {
+	      absorbed = true;
 	      type = tEVEN;
 	      for(ChildAssoc *gca = child->children; gca;
 		  gca = gca->next_child)
@@ -1777,22 +1485,20 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	    }
 	    ca = ca->next_child;
 	  }
-	  if(collapsed) {
+	  if(absorbed) {
 	    add_in_pstack(bc);
 	    return true;
 	  }
 	}
 
-	/* Collapse some nested EVENs */
 	if(type == tEVEN) {
-	  bool collapsed = false;
+	  bool absorbed = false;
 	  for(ChildAssoc *ca = children; ca; ) {
 	    Gate * const child = ca->child;
-	    if(child->type == tODD &&
-	       (collapse_shared || child->parents->next_parent == 0)) {
-	      /* EVEN(x,ODD(t,u,v),y) = ~ODD(x,ODD(t,u,v),y) =
-	       * ~ODD(x,t,u,v,y) = EVEN(x,t,u,v,y) */
-	      collapsed = true;
+	    if(child->type == tODD and
+	       (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+		!child->has_many_parents())) {
+	      absorbed = true;
 	      for(ChildAssoc *gca = child->children; gca;
 		  gca = gca->next_child)
 		add_child(gca->child);
@@ -1802,14 +1508,13 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	      child->add_in_pstack(bc);
 	      continue;
 	    }
-	    if(child->type == tEVEN &&
-	       (collapse_shared || child->parents->next_parent == 0)) {
+	    if(child->type == tEVEN and
+	       (opts.absorb_children == SimplifyOptions::CHILDABSORB_ALL or
+		!child->has_many_parents())) {
 	      for(ChildAssoc *gca = child->children; gca;
 		  gca = gca->next_child)
 		add_child(gca->child);
-	      /* EVEN(x,EVEN(t,u,v),y) = ~ODD(x,EVEN(t,u,v),y) =
-	       * ~EVEN(x,t,u,v,y) = ODD(x,t,u,v,y) */
-	      collapsed = true;
+	      absorbed = true;
 	      type = tODD;
 	      ChildAssoc *next_ca = ca->next_child;
 	      delete ca;
@@ -1819,7 +1524,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	    }
 	    ca = ca->next_child;
 	  }
-	  if(collapsed) {
+	  if(absorbed) {
 	    add_in_pstack(bc);
 	    return true;
 	  }
@@ -1831,108 +1536,106 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 
   case tEQUIV:
     {
-      assert(children);
-
-      if(!children->next_child)
+      assert(nof_children() > 0);
+      
+      if(nof_children() == 1)
 	{
-	  /* EQUIV(x) = T */
-	  if(determined && value != true)
+	  if(determined and value != true)
 	    return false;
 	  transform_into_constant(bc, true);
 	  add_parents_in_pstack(bc);
 	  return true;
 	}
-
-      /* Check for determined children and count undetermined children */
-      unsigned int nof_undet = 0;
-      for(ChildAssoc *ca = children; ca; ca = ca->next_child)
+      if(nof_children() == 2)
 	{
-	  Gate * const child = ca->child;
-	  if(!child->determined) {
-	    nof_undet++;
-	    continue;
-	  }
-	  if(child->value == true) {
-	    /* EQUIV(T,x,y,z) --> AND(T,x,y,z) */
-	    type = tAND;
-	    add_parents_in_pstack(bc);
-	    add_in_pstack(bc);
-	    return true;
-	  }
-	  /* child->value == false */
-	  /* EQUIV(F,x,y,z) --> NOT(OR(F,x,y,z)) */
-	  Gate *new_or = new Gate(tOR);
-	  bc->install_gate(new_or);
-	  while(children)
-	    children->change_parent(new_or);
-	  type = tNOT;
-	  add_child(new_or);
+	  type = tEVEN;
 	  add_parents_in_pstack(bc);
 	  add_in_pstack(bc);
-	  new_or->add_in_pstack(bc);
 	  return true;
 	}
 
-      if(!remove_g_not_g_and_duplicate_children(bc))
+      /*
+       * Constant folding
+       */
+      if(opts.constant_folding)
+	{
+	  for(ChildAssoc* ci = children; ci; ci = ci->next_child)
+	    {
+	      Gate* const child = ci->child;
+	      if(!child->determined)
+		continue;
+	      if(child->value == true) {
+		type = tAND;
+		add_parents_in_pstack(bc);
+		add_in_pstack(bc);
+		return true;
+	      }
+	      DEBUG_ASSERT(child->value == false);
+	      Gate *new_or = new Gate(tOR);
+	      bc->install_gate(new_or);
+	      while(children)
+		children->change_parent(new_or);
+	      type = tNOT;
+	      add_child(new_or);
+	      add_parents_in_pstack(bc);
+	      add_in_pstack(bc);
+	      new_or->add_in_pstack(bc);
+	      return true;
+	    }
+	}
+
+      if(!remove_duplicate_and_g_not_g_children(bc,
+						opts.remove_duplicate_children,
+						opts.remove_g_not_g_children))
 	return false;
       if(in_pstack)
 	return true;
       if(type != tEQUIV)
 	return true;
 
-      if(determined && value == true)
+      if(opts.inline_equivalences and determined and value == true)
 	{
-	  /*
-	   * All the children are equivalent
-	   */
 	  if(bc->may_transform_input_gates) {
-	    /*
-	     * Unify all input gates
-	     */
 	    Gate *first_input_gate = 0;
 	    bool unified = false;
-	    for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	      Gate * const child = ca->child;
+	    for(ChildAssoc* ca = children; ca; ca = ca->next_child) {
+	      Gate* const child = ca->child;
 	      if(child->type != tVAR)
 		continue;
-	      DEBUG_ASSERT(!child->determined);
-	      if(child->parents->next_parent == 0) {
-		/* A non-shared input gate x in EQUIV(x,y,z) = T
-		 * make x equivalent to y */
+	      if(!child->has_many_parents()) {
 		DEBUG_ASSERT(child->parents->parent == this);
 		Gate *other_child = 0;
-		if(ca->next_child)
-		  other_child = ca->next_child->child;
-		else {
-		  DEBUG_ASSERT(ca->prev_child);
-		  other_child = ca->prev_child->child;
+		for(ChildAssoc* ci2 = children; ci2; ci2 = ci2->next_child) {
+		  if(ci2->child != child) {
+		    other_child = ci2->child;
+		    break;
+		  }
 		}
-		assert(other_child != child);
-		child->type = tREF;
-		child->add_child(other_child);
-		add_in_pstack(bc);
-		child->add_in_pstack(bc);
-		return true;
+		if(other_child) {
+		  assert(other_child != child);
+		  child->type = tREF;
+		  child->add_child(other_child);
+		  add_in_pstack(bc);
+		  child->add_in_pstack(bc);
+		  return true;
+		}
 	      }
 	      if(first_input_gate == 0) {
 		first_input_gate = child;
 		continue;
 	      }
-	      unified = true;
-	      child->type = tREF;
-	      child->add_child(first_input_gate);
-	      child->add_in_pstack(bc);
+	      if(child != first_input_gate) {
+		unified = true;
+		child->type = tREF;
+		child->add_child(first_input_gate);
+		child->add_in_pstack(bc);
+	      }
 	    }
 	    if(unified) {
 	      first_input_gate->add_parents_in_pstack(bc);
 	      return true;
 	    }
 	  }
-	  /*
-	   * Find a least child gate (i.e., a child that does not depend on
-	   * any other child) and
-	   * transform the edges to other children to point to it
-	   */
 	  ChildAssoc *ca = children;
 	  Gate *least_child = ca->child;
 	  ca = ca->next_child;
@@ -1960,18 +1663,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	    return true;
 	  }
 	  return true;
-	} /*if(determined && value == true) { */
-
-
-      if(determined && value == false && count_children() == 2)
-	{
-	  /* EQUIV(x,y)=F <=> EVEN(x,y)=F */
-	  type = tEVEN;
-	  add_parents_in_pstack(bc);
-	  add_in_pstack(bc);
-	  return true;
-	}
-
+	} /* if(determined && value == true) { */
 
       return true;
     }
@@ -1980,11 +1672,9 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
     {
 #define NEW_CARDINALITY_SIMPLIFY
 #ifdef NEW_CARDINALITY_SIMPLIFY
-      unsigned int nof_undet = 0;
 
       if(tmin > tmax) {
-	/* Trivially false */
-	if(determined && value != false)
+	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	add_parents_in_pstack(bc);
@@ -1994,7 +1684,6 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
       for(ChildAssoc *ca = children; ca; ) {
 	assert(tmin <= tmax);
 	if(tmax == 0) {
-	  /* [0,0](x,y,z) = NOT(OR(x,y,z)) */
 	  Gate *new_or = new Gate(tOR);
 	  bc->install_gate(new_or);
 	  new_or->add_in_pstack(bc);
@@ -2007,19 +1696,15 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	}
 	Gate * const child = ca->child;
 	if(!child->determined) {
-	  nof_undet++;
 	  ca = ca->next_child;
 	  continue;
 	}
 	if(child->value == false) {
-	  /* [L,U](F,x,y) = [L,U](x,y) */
 	  ChildAssoc *next_ca = ca->next_child;
 	  delete ca;
 	  ca = next_ca;
 	  continue;
 	}
-	/* child->value == true */
-	/* [L,U](T,x,y) = [L-1,U-1](x,y) */
 	assert(tmax > 0);
 	tmin = (tmin == 0)?0:tmin-1;
 	tmax = tmax - 1;
@@ -2029,22 +1714,21 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
       }
 
       assert(tmin <= tmax);
-      if(tmin > nof_undet) {
-	/* Trivially false */
-	if(determined && value != false)
+
+      if(tmin > nof_children()) {
+	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(tmax > nof_undet)
-	tmax = nof_undet;
-
-      assert(tmin <= tmax && tmax <= nof_undet);
+      if(tmax > nof_children())
+	tmax = nof_children();
+      
+      assert(tmin <= tmax and tmax <= nof_children());
 
       if(!children) {
-	assert(tmin == 0 && tmax == 0);
-	/* [0,0]() = T */
+	assert(tmin == 0 and tmax == 0);
 	if(determined && value != true)
 	  return false;
 	transform_into_constant(bc, true);
@@ -2052,7 +1736,6 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	return true;
       }
       if(tmax == 0) {
-	/* [0,0](x,y,z) = NOT(OR(x,y,z)) */
 	Gate *new_or = new Gate(tOR);
 	bc->install_gate(new_or);
 	new_or->add_in_pstack(bc);
@@ -2064,22 +1747,19 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(tmin == nof_undet) {
-	/* [3,3](x,y,z) = AND(x,y,z) */
+      if(tmin == nof_children()) {
 	type = tAND; tmin = 0; tmax = 0;
 	add_in_pstack(bc);
 	return true;
       }
-      if(tmin == 0 && tmax == nof_undet) {
-	/* [0,3](x,y,z) = T */
-	if(determined && value != true)
+      if(tmin == 0 && tmax == nof_children()) {
+	if(determined and value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(tmin == 0 && tmax + 1 == nof_undet) {
-	/* [0,2](x,y,z) = NOT(AND(x,y,z)) */
+      if(tmin == 0 and tmax + 1 == nof_children()) {
 	Gate *new_and = new Gate(tAND);
 	bc->install_gate(new_and);
 	new_and->add_in_pstack(bc);
@@ -2094,34 +1774,34 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 #else
       unsigned int nof_undet = 0, nof_true = 0, nof_false = 0;
       count_child_info(nof_true, nof_false, nof_undet);
-      const unsigned int nof_children = nof_true + nof_false + nof_undet;
+      DEBUG_ASSERT(nof_children() == nof_true + nof_false + nof_undet);
       
-      if(tmin > tmax || tmin > nof_children) {
-	/* Trivially false */
+      if(tmin > tmax or tmin > nof_children()) {
 	if(determined && value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(tmax > nof_children)
-	tmax = nof_children;
+      if(tmax > nof_children())
+	tmax = nof_children();
       
       assert(tmin <= tmax);
-      assert(tmax <= nof_children);
+      assert(tmax <= nof_children());
 
-      if(determined && value == true) {
+      if(determined and value == true) {
 	if(nof_true > tmax)
 	  return false;
-	if(nof_children - nof_false < tmin)
+	/* The tmin limit cannot be reached anymore? */
+	if(nof_children() - nof_false < tmin)
 	  return false;
-	if(nof_true >= tmin && nof_children - nof_false <= tmax) {
+	/* Always within (inclusive) tmin and tmax? */
+	if(nof_true >= tmin and nof_children() - nof_false <= tmax) {
 	  transform_into_constant(bc, true);
 	  add_parents_in_pstack(bc);
 	  return true;
 	}
 	if(nof_true == tmax) {
-	  /* assign undetermined children to false */
 	  while(children) {
 	    Gate *child = children->child;
 	    if(!child->determined) {
@@ -2137,8 +1817,7 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	  add_parents_in_pstack(bc);
 	  return true;
 	}
-	if(nof_children - nof_false == tmin) {
-	  /* assign undetermined children to true */
+	if(nof_children() - nof_false == tmin) {
 	  while(children) {
 	    Gate *child = children->child;
 	    if(!child->determined) {
@@ -2164,9 +1843,9 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	return true;
       }
       if(determined && value == false) {
-	if(nof_true >= tmin && nof_children - nof_false <= tmax)
+	if(nof_true >= tmin and nof_children() - nof_false <= tmax)
 	  return false;
-	if(nof_true > tmax || nof_children - nof_false < tmin) {
+	if(nof_true > tmax or nof_children() - nof_false < tmin) {
 	  transform_into_constant(bc, false);
 	  add_parents_in_pstack(bc);
 	  return true;
@@ -2181,12 +1860,12 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 	return true;
       }
       assert(!determined);
-      if(nof_true >= tmin && nof_children - nof_false <= tmax) {
+      if(nof_true >= tmin and nof_children() - nof_false <= tmax) {
 	transform_into_constant(bc, true);
 	add_parents_in_pstack(bc);
 	return true;
       }
-      if(nof_true > tmax || nof_children - nof_false < tmin) {
+      if(nof_true > tmax or nof_children() - nof_false < tmin) {
 	transform_into_constant(bc, false);
 	add_parents_in_pstack(bc);
 	return true;
@@ -2201,70 +1880,57 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 #endif
 
 
-      if(false)
+      if(opts.misc_reductions)
 	{
-	  /* Find duplicate children, not yet exploited */
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	    ca->child->temp = 0;
-	  int max_occur = 0;
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	    ca->child->temp++;
-	    if(ca->child->temp > max_occur)
-	      max_occur = ca->child->temp;
-	  }
-	  if(max_occur > 1)
-	    fprintf(stderr, "MUU ");
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	    ca->child->temp = 0;
-	}
-
-      if(determined && value == true) {
+	  if(determined and value == true) {
 #ifdef DEBUG_EXPENSIVE_CHECKS
-	for(Gate *g = bc->first_gate; g; g = g->next)
-	  assert(g->temp == 0);
+	    for(Gate* g = bc->first_gate; g; g = g->next)
+	      assert(g->temp == 0);
 #endif
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 1;
-	
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	  Gate * const child = ca->child;
-	  for(ChildAssoc *fa = child->parents; fa; ) {
-	    Gate * const parent = fa->parent;
-	    ChildAssoc *next_fa = fa->next_parent;
-	    while(next_fa && next_fa->parent == parent)
-	      next_fa = next_fa->next_parent;
-	    if(parent->type == tAND) {
-	      bool all_same = true;
-	      unsigned int nof_children = 0;
-	      for(ChildAssoc *fca = parent->children; fca; fca=fca->next_child) {
-		if(fca->child->temp != 1) {
-		  all_same = false;
-		  break;
+	    for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	      ci->child->temp = 1;
+	    
+	    for(const ChildAssoc* ci = children; ci; ci = ci->next_child) {
+	      Gate* const child = ci->child;
+	      for(const ChildAssoc* pi = child->parents; pi; ) {
+		Gate* const parent = pi->parent;
+		const ChildAssoc* next_pi = pi->next_parent;
+		while(next_pi and next_pi->parent == parent)
+		  next_pi = next_pi->next_parent;
+		if(parent->type == tAND and parent->nof_children() > tmax) {
+		  unsigned int nof_common_children = 0;
+		  for(ChildAssoc* pci = parent->children;
+		      pci;
+		      pci = pci->next_child) {
+		    if(pci->child->temp == 1)
+		      nof_common_children++;
+		    if(nof_common_children > tmax)
+		      break;
+		  }
+		  if(nof_common_children > tmax) {
+		    if(parent->determined and parent->value != false) {
+		      for(const ChildAssoc* ci2 = children;
+			  ci2; ci2 = ci2->next_child)
+			ci2->child->temp = 0;
+		      return false;
+		    }
+		    parent->transform_into_constant(bc, false);
+		    parent->add_parents_in_pstack(bc);
+		  }
 		}
-		nof_children++;
-	      }
-	      if(all_same && nof_children > tmax) {
-		/* [0,2](x,y,z,v) = T ==> AND(x,y,z) = F */
-		if(parent->determined && parent->value != false) {
-		  /* temps left unclear! */
-		  return false;
-		}
-		parent->transform_into_constant(bc, false);
-		parent->add_parents_in_pstack(bc);
+		pi = next_pi;
 	      }
 	    }
-	    fa = next_fa;
+	    for(const ChildAssoc* ci = children; ci; ci = ci->next_child)
+	      ci->child->temp = 0;
 	  }
 	}
-
-	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	  ca->child->temp = 0;
-      }
-
+      
       if(type != tTHRESHOLD)
 	return true;
 
-      if(!remove_cardinality_g_not_g(bc))
+      if(opts.remove_g_not_g_children and
+	 !remove_cardinality_g_not_g(bc))
 	return false;
 
       return true;
@@ -2273,82 +1939,59 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
 
   case tATLEAST:
     {
-      unsigned int nof_undet = 0;
-
       /*
-       * Remove determined children and count undetermined ones
+       * Remove determined children
        */
-      for(ChildAssoc *ca = children; ca; )
+      if(opts.constant_folding) 
 	{
-	  Gate * const child = ca->child;
-	  if(!child->determined) {
-	    nof_undet++;
-	    ca = ca->next_child;
-	    continue;
-	  }
-	  if(child->value == false)
+	  for(ChildAssoc* ci = children; ci; )
 	    {
-	      /* [L,](F,x,y) = [L,](x,y) */
-	      ChildAssoc *next_ca = ca->next_child;
-	      delete ca;
-	      ca = next_ca;
-	      continue;
+	      Gate* const child = ci->child;
+	      ChildAssoc* next_ci = ci->next_child;
+	      if(!child->determined) {
+		ci = next_ci;
+		continue;
+	      }
+	      if(child->value == false)
+		{
+		  delete ci;
+		  ci = next_ci;
+		  continue;
+		}
+	      DEBUG_ASSERT(child->value == true);
+	      tmin = (tmin == 0)?0:tmin-1;
+	      delete ci;
+	      ci = next_ci;
 	    }
-	  DEBUG_ASSERT(child->value == true);
-	  /* [L,](T,x,y) = [L-1,](x,y) */
-	  tmin = (tmin == 0)?0:tmin-1;
-	  ChildAssoc *next_ca = ca->next_child;
-	  delete ca;
-	  ca = next_ca;
 	}
-
       if(tmin == 0)
 	{
-	  /* Trivially true */
-	  if(determined && value != true)
+	  if(determined and value != true)
 	    return false;
 	  transform_into_constant(bc, true);
 	  add_parents_in_pstack(bc);
 	  return true;
 	}
-
-      if(tmin > nof_undet)
+      if(tmin > nof_children())
 	{
-	  /* Trivially false */
-	  if(determined && value != false)
+	  if(determined and value != false)
 	    return false;
 	  transform_into_constant(bc, false);
 	  add_parents_in_pstack(bc);
 	  return true;
 	}
+      
+      assert(nof_children() > 0);
+      assert(tmin <= nof_children());
 
-      assert(tmin <= nof_undet);
-      assert(children);
-
-      if(tmin == nof_undet)
+      if(tmin == nof_children())
 	{
-	  /* [3,](x,y,z) = AND(x,y,z) */
-	  type = tAND;
-	  tmin = 0;
-	  tmax = 0;
+	  type = tAND; tmin = 0; tmax = 0;
+	  add_parents_in_pstack(bc);
 	  add_in_pstack(bc);
 	  return true;
 	}
-
-      if(false)
-	{
-	  /* Find duplicate children, not yet exploited */
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	    ca->child->temp = 0;
-	  int max_occur = 0;
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
-	    ca->child->temp++;
-	    if(ca->child->temp > max_occur)
-	      max_occur = ca->child->temp;
-	  }
-	  for(ChildAssoc *ca = children; ca; ca = ca->next_child)
-	    ca->child->temp = 0;
-	}
+      
 
       /*
       if(!remove_atleast_g_not_g(bc))
@@ -2362,18 +2005,479 @@ Gate::simplify(BC* const bc, const bool opt_preserve_cnf_normalized_form)
     internal_error(text_NI, __FILE__, __LINE__, typeNames[type]);
   }
 
-  internal_error(text_SNH, __FILE__, __LINE__);
+  _should_not_happen();
   return true;
 }
 
 
-void Gate::remove_determined_children(BC *bc)
+
+
+
+/**************************************************************************
+ *
+ * Transforms the gate into a constant gate
+ * Used by simplify and cnf_normalize
+ *
+ **************************************************************************/
+
+void Gate::transform_into_constant(BC* const bc, const bool v)
 {
+  if(determined) {
+    if(value != v)
+      _should_not_happen();
+  } else {
+    determined = true;
+    value = v;
+  }
+  type = value?tTRUE:tFALSE;
+  while(children) {
+    Gate* const child = children->child;
+    delete children;
+    if(!child->has_parents())
+      child->add_in_pstack(bc);
+  }
+  bc->changed = true;
+}
+
+
+
+
+
+
+
+/**************************************************************************
+ *
+ * Simplifies AND(x,~x,y,z) to F, OR(x,~x,y,z) to T, and EQUIV(x,~x,y,z) to F
+ * Also removes duplicate children of AND, OR, and EQUIV
+ * Returns false if an inconsistency is found (implying unsatisfiability)
+ *
+ **************************************************************************/
+
+bool
+Gate::remove_duplicate_and_g_not_g_children(BC* const bc,
+					    const bool simplify_duplicates,
+					    const bool simplify_g_not_g)
+{
+  if(type == tODD or type == tEVEN)
+    return remove_parity_duplicate_and_g_not_g_children(bc,
+							simplify_duplicates,
+							simplify_g_not_g);
+  
+  if(!(type == tOR or type == tAND or type == tEQUIV))
+    return true;
+  
+  for(const ChildAssoc* ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+  bool g_not_g_found = false;
+
+  for(ChildAssoc* ca = children; ca; ) {
+    Gate* child = ca->child;
+    if(child->determined) {
+      ca = ca->next_child;
+      continue;
+    }
+    if(simplify_duplicates and child->temp == 1) {
+      /* A duplicate child found, remove because
+       * AND(x,x,y,z) == AND(x,y,z), OR(x,x,y,z) == OR(x,y,z)
+       * EQUIV(x,x,y,z) == EQUIV(x,y,z) */
+      ChildAssoc* next_ca = ca->next_child;
+      delete ca;
+      ca = next_ca;
+      continue;
+    }
+    if(simplify_g_not_g and child->temp == 2) {
+      /* child already seen in negative phase! */
+      g_not_g_found = true;
+      break;
+    }
+    /* Child not seen in either negative or positive phase,
+     * mark it seen in the positive phase */
+    child->temp = 1;
+    
+    if(simplify_g_not_g and child->type == tNOT) {
+      Gate* const grandchild = child->first_child();
+      if(grandchild->temp == 1) {
+	/* grandchild already seen in positive phase! */
+	g_not_g_found = true;
+	break;
+      }
+      grandchild->temp = 2;
+    }
+    ca = ca->next_child;
+    continue;
+  }
+
+  for(const ChildAssoc* ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+  if(simplify_g_not_g and g_not_g_found)
+    {
+      if(type == tAND) {
+	if(determined and value != false)
+	  return false;
+	transform_into_constant(bc, false);
+	add_parents_in_pstack(bc);
+	return true;
+      }
+      else if(type == tOR) {
+	if(determined and value != true)
+	  return false;
+	transform_into_constant(bc, true);
+	add_parents_in_pstack(bc);
+	return true;
+      }
+      else if(type == tEQUIV) {
+	if(determined and value != false)
+	  return false;
+	transform_into_constant(bc, false);
+	add_parents_in_pstack(bc);
+	return true;
+      }
+      _should_not_happen();
+    }
+
+  if(nof_children() == 1) {
+    add_in_pstack(bc);
+  }
+
+  return true;
+}
+
+
+
+
+#ifdef DEVELOPEMENT
+#if 0
+/**************************************************************************
+ *
+ * Removes duplicate children of ODD and EVEN by using equations
+ * ODD(x,x,y,z) = ODD(y,z) and EVEN(x,x,y,z) = EVEN(y,z)
+ * Returns false if an inconsistency is found (implying unsatisfiability)
+ *
+ **************************************************************************/
+
+bool
+Gate::remove_parity_duplicate_children(BC *bc)
+{
+  if(!(type == tODD or type == tEVEN))
+    return true;
+
+  for(const ChildAssoc* ca = children; ca; ca = ca->next_child)
+    ca->child->temp = 0;
+  
   for(ChildAssoc *ca = children; ca; ) {
-    Gate * const child = ca->child;
+    Gate* child = ca->child;
+    if(child->determined) {
+      ca = ca->next_child;
+      continue;
+    }
+    if(child->temp == 1) {
+      /* A duplicate child found, remove this and previous occurrence because
+       * ODD(x,x,y,z) == ODD(y,z) and EVEN(x,x,y,z) == EVEN(y,z) */
+      child->temp = 0;
+      ChildAssoc *ca2 = children;
+      while(ca2 != ca) {
+	if(ca2->child == child) {
+	  delete ca2;
+	  break;
+	}
+	ca2 = ca2->next_child;
+      }
+      assert(ca2 != ca);
+      ChildAssoc *next_ca = ca->next_child;
+      delete ca;
+      ca = next_ca;
+      if(!child->parents)
+	child->add_in_pstack(bc);
+      continue;
+    }
+    child->temp = 1;
+
+    ca = ca->next_child;
+    continue;
+  }
+
+  for(const ChildAssoc* ca = children; ca; ca = ca->next_child)
+    ca->child->temp = 0;
+
+  if(!children) {
+    if(type == tODD) {
+      if(determined and value != false)
+	return false;
+      transform_into_constant(bc, false);
+      add_parents_in_pstack(bc);
+      return true;
+    }
+    else if(type == tEVEN) {
+      if(determined and value != true)
+	return false;
+      transform_into_constant(bc, true);
+      add_parents_in_pstack(bc);
+      return true;
+    }
+    else
+      assert(should_not_happen);
+  }
+
+  if(nof_children() == 1) {
+    add_in_pstack(bc);
+  }
+
+  return true;
+}
+#endif
+#endif
+
+
+
+
+/**************************************************************************
+ *
+ * Simplifies [L,U](x,~x,y,z) to [L-1,U-1](y,z)
+ * Returns false if an inconsistency is found (implying unsatisfiability)
+ *
+ **************************************************************************/
+
+bool
+Gate::remove_cardinality_g_not_g(BC *bc)
+{
+  if(type != tTHRESHOLD)
+    return true;
+
+  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+  for(ChildAssoc *ca = children; ca; ) {
+    Gate *child = ca->child;
+    if(child->temp == 2) {
+      /* child already seen in negative phase: simplify
+       * [L,U](~x,y,x,z) to [L-1,U-1](y,z) */
+      child->temp = 0;
+      ChildAssoc *ca2 = children;
+      while(ca2 != ca) {
+	Gate * const child2 = ca2->child;
+	if(child2->type == tNOT && child2->children->child == child) {
+	  child2->temp = 0;
+	  delete ca2;
+	  if(!child2->parents)
+	    child2->add_in_pstack(bc);
+ 	  break;
+	}
+	ca2 = ca2->next_child;
+      }
+      assert(ca2 != ca);
+      ChildAssoc *next_ca = ca->next_child;
+      delete ca;
+      ca = next_ca;
+      if(tmax == 0) {
+	if(determined and value != false)
+	  return false;
+	transform_into_constant(bc, false);
+	add_parents_in_pstack(bc);
+	return true;
+      }
+      tmin = (tmin == 0)?0:tmin - 1;
+      tmax = tmax - 1;
+      continue;
+    }
+    if(child->temp == 1) {
+      ;
+    }
+    child->temp = 1;
+
+    if(child->type == tNOT) {
+      Gate *grandchild = child->children->child;
+      if(grandchild->temp == 1) {
+	/* grandchild already seen in positive phase: simplify
+	 * [L,U](x,y,~x,z) to [L-1,U-1](y,z) */
+	child->temp = 0;
+	grandchild->temp = 0;
+	ChildAssoc *ca2 = children;
+	while(ca2 != ca) {
+	  if(ca2->child == grandchild) {
+	    delete ca2;
+	    break;
+	  }
+	  ca2 = ca2->next_child;
+	}
+	assert(ca2 != ca);
+	ChildAssoc *next_ca = ca->next_child;
+	delete ca;
+	ca = next_ca;
+	if(!child->parents)
+	  child->add_in_pstack(bc);
+	if(tmax == 0) {
+	  if(determined and value != false)
+	    return false;
+	  transform_into_constant(bc, false);
+	  add_parents_in_pstack(bc);
+	  return true;
+	}
+	tmin = (tmin == 0)?0:tmin - 1;
+	tmax = tmax - 1;
+	continue;
+      }
+      grandchild->temp = 2;
+    }
+    ca = ca->next_child;
+    continue;
+  }
+
+  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+#ifdef DEBUG_EXPENSIVE_CHECKS
+  for(const Gate* g = bc->first_gate; g; g = g->next)
+    assert(g->temp == 0);
+#endif
+
+  return true;
+}
+
+
+
+
+/**************************************************************************
+ *
+ * Apply ODD(x,~x,y,z) -> EVEN(y,z) and EVEN(x,~x,y,z) = ODD(y,z).
+ * Returns false if an inconsistency is found (implying unsatisfiability)
+ *
+ **************************************************************************/
+
+bool
+Gate::remove_parity_duplicate_and_g_not_g_children(BC* const bc,
+						   const bool remove_duplicates,
+						   const bool remove_g_not_g)
+{
+  if(!(type == tODD or type == tEVEN))
+    return true;
+
+  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+  for(ChildAssoc* ca = children; ca; )
+    {
+      Gate* child = ca->child;
+
+      if(remove_duplicates and child->temp == 1)
+	{
+	  child->temp = 0;
+	  if(child->type == tNOT) child->first_child()->temp = 0;
+	  ChildAssoc* ci2 = children;
+	  for( ; ci2 != ca; ci2 = ci2->next_child) {
+	    Gate* const child2 = ci2->child;
+	    if(child2 == child) {
+	      delete ci2;
+	      if(!child2->has_parents())
+		child2->add_in_pstack(bc);
+	      break;
+	    }
+	  }
+	  DEBUG_ASSERT(ci2 != ca);
+	  ChildAssoc *next_ca = ca->next_child;
+	  delete ca;
+	  ca = next_ca;
+	  continue;
+	}
+      if(remove_g_not_g and child->temp == 2)
+	{
+	  child->temp = 0;
+	  ChildAssoc *ci2 = children;
+	  for( ; ci2 != ca; ci2 = ci2->next_child) {
+	    Gate* const child2 = ci2->child;
+	    if(child2->type == tNOT and child2->first_child() == child) {
+	      child2->temp = 0;
+	      delete ci2;
+	      if(!child2->has_parents())
+		child2->add_in_pstack(bc);
+	      break;
+	    }
+	  }
+	  assert(ci2 != ca);
+	  ChildAssoc *next_ca = ca->next_child;
+	  delete ca;
+	  ca = next_ca;
+	  if(type == tODD) type = tEVEN;
+	  else if(type == tEVEN) type = tODD;
+	  else _should_not_happen();
+	  continue;
+	}
+
+      child->temp = 1;
+
+      if(remove_g_not_g and child->type == tNOT)
+	{
+	  Gate* const grandchild = child->first_child();
+	  if(grandchild->temp == 1) {
+	    child->temp = 0;
+	    grandchild->temp = 0;
+	    if(grandchild->type == tNOT) grandchild->first_child()->temp = 0;
+	    ChildAssoc *ca2 = children;
+	    for( ; ca2 != ca; ca2 = ca2->next_child) {
+	      if(ca2->child == grandchild) {
+		delete ca2;
+		break;
+	      }
+	    }
+	    assert(ca2 != ca);
+	    ChildAssoc *next_ca = ca->next_child;
+	    delete ca;
+	    ca = next_ca;
+	    if(!child->has_parents())
+	      child->add_in_pstack(bc);
+	    if(type == tODD) type = tEVEN;
+	    else if(type == tEVEN) type = tODD;
+	    else _should_not_happen();
+	    continue;
+	  }
+	  grandchild->temp = 2;
+	}
+      ca = ca->next_child;
+      continue;
+    }
+
+  for(ChildAssoc *ca = children; ca; ca = ca->next_child) {
+    ca->child->temp = 0;
+    if(ca->child->type == tNOT)
+      ca->child->children->child->temp = 0;
+  }
+
+#ifdef DEBUG_EXPENSIVE_CHECKS
+  for(const Gate* g = bc->first_gate; g; g = g->next)
+    assert(g->temp == 0);
+#endif
+
+  return true;
+}
+
+
+
+
+
+void
+Gate::remove_determined_children(BC* const bc)
+{
+  for(ChildAssoc* ca = children; ca; ) {
+    Gate* const child = ca->child;
     if(child->determined) {
       bc->changed = true;
-      ChildAssoc *next_ca = ca->next_child;
+      ChildAssoc* next_ca = ca->next_child;
       delete ca;
       ca = next_ca;
       if(!child->parents)
@@ -2383,6 +2487,7 @@ void Gate::remove_determined_children(BC *bc)
     ca = ca->next_child;
   }
 }
+
 
 
 
@@ -2446,7 +2551,7 @@ Gate::cnf_normalize(BC* const bc)
 
   case tVAR:
     {
-      DEBUG_ASSERT(count_children() == 0);
+      DEBUG_ASSERT(nof_children() == 0);
       return true;
     }
 
@@ -2455,7 +2560,7 @@ Gate::cnf_normalize(BC* const bc)
       /*
        * Remove REFs
        */
-      DEBUG_ASSERT(count_children() == 1);
+      DEBUG_ASSERT(nof_children() == 1);
       Gate* const child = children->child;
       DEBUG_ASSERT(child != this);
       if(determined) {
@@ -2476,7 +2581,7 @@ Gate::cnf_normalize(BC* const bc)
 
   case tNOT:
     {
-      DEBUG_ASSERT(count_children() == 1);
+      DEBUG_ASSERT(nof_children() == 1);
       Gate * const child = children->child;
       /*
        * The value of a determined NOT-gate must be propagated downwards!
@@ -2498,7 +2603,7 @@ Gate::cnf_normalize(BC* const bc)
       DEBUG_ASSERT(!determined);
       if(child->type == tNOT) {
 	/* g := ~~h  --> g := h */
-	DEBUG_ASSERT(child->count_children() == 1);
+	DEBUG_ASSERT(child->nof_children() == 1);
 	Gate * const grandchild = child->children->child;
 	DEBUG_ASSERT(grandchild != this);
 	while(parents) parents->change_child(grandchild);
@@ -2513,8 +2618,8 @@ Gate::cnf_normalize(BC* const bc)
   case tOR:
   case tAND:
     {
-      DEBUG_ASSERT(count_children() >= 1);
-      if(count_children() == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* Unary ANDs and ORs are removed */
 	type = tREF;
 	add_in_pstack(bc);
@@ -2525,23 +2630,18 @@ Gate::cnf_normalize(BC* const bc)
     
   case tEQUIV:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
-	/* EQUIV(x) = T */
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	if(determined and value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	return true;
       }
-      if(nof_children == 2) {
+      if(nof_children() == 2) {
 	/* binary EQUIVS are OK */
 	return true;
       }
-      /*
-       * N-ary EQUIVS for N >= 3 are removed:
-       * g := EQUIV(c1,...,cn) --> g := OR(AND(c1,...,cn),AND(~c1,...,~cn))
-       */
+      DEBUG_ASSERT(nof_children() >= 3);
       Gate* const new_child1 = new Gate(tAND);
       bc->install_gate(new_child1);
       for(const ChildAssoc* ca = children; ca; ca = ca->next_child)
@@ -2565,49 +2665,26 @@ Gate::cnf_normalize(BC* const bc)
       return true;
     }
 
-  case Gate::tITE: {
-    DEBUG_ASSERT(count_children() == 3);
-#if 0
-    /* ITEs can be exploded by ITE(i,t,e) <=> (i & t) | (~i & e)
-       However, ITEs can also be translated directly to CNF so there is
-       no need for this */
-    Gate *if_child = children->child;
-    Gate *then_child = children->next_child->child;
-    Gate *else_child = children->next_child->next_child->child;
-    remove_all_children();
-    type = tOR;
-    Gate *new_child1 = new Gate(tAND, if_child, then_child);
-    bc->install_gate(new_child1);
-    new_child1->add_in_pstack(bc);
-    add_child(new_child1);
-    Gate *new_not = new Gate(tNOT, if_child);
-    bc->install_gate(new_not);
-    new_not->add_in_pstack(bc);
-    Gate *new_child2 = new Gate(tAND, new_not, else_child);
-    bc->install_gate(new_child2);
-    new_child2->add_in_pstack(bc);
-    add_child(new_child2);
-#endif
-    return true;
-  }
+  case Gate::tITE:
+    {
+      DEBUG_ASSERT(nof_children() == 3);
+      return true;
+    }
 
   case Gate::tTHRESHOLD:
     {
       /* Threshold gates must be eliminated! */
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(tmin > nof_children) {
-	/* trivially false */
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(tmin > nof_children()) {
 	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	tmin = 0; tmax = 0;
 	return true;
       }
-      if(tmax > nof_children)
-	tmax = nof_children;
+      if(tmax > nof_children())
+	tmax = nof_children();
       if(tmin > tmax) {
-	/* trivially false */
 	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
@@ -2616,26 +2693,23 @@ Gate::cnf_normalize(BC* const bc)
       }
 
       DEBUG_ASSERT(tmin <= tmax);
-      DEBUG_ASSERT(tmax <= nof_children);
+      DEBUG_ASSERT(tmax <= nof_children());
       
-      if(nof_children == 1) {
-	if(tmin == 0 && tmax == 1) {
-	  /* [0,1](x) == T */
+      if(nof_children() == 1) {
+	if(tmin == 0 and tmax == 0) {
+	  type = Gate::tNOT;
+	  tmin = 0; tmax = 0;
+	  add_in_pstack(bc);
+	  return true;
+	}
+	else if(tmin == 0 and tmax == 1) {
 	  if(determined and value != true)
 	    return false;
 	  transform_into_constant(bc, true);
 	  tmin = 0; tmax = 0;
 	  return true;
 	}
-	else if(tmin == 0 && tmax == 0) {
-	  /* [0,0](x) == NOT(x) */
-	  type = Gate::tNOT;
-	  tmin = 0; tmax = 0;
-	  add_in_pstack(bc);
-	  return true;
-	}
-	else if(tmin == 1 && tmax == 1) {
-	  /* [1,1](x) == x */
+	else if(tmin == 1 and tmax == 1) {
 	  type = Gate::tREF;
 	  tmin = 0; tmax = 0;
 	  add_in_pstack(bc);
@@ -2644,18 +2718,16 @@ Gate::cnf_normalize(BC* const bc)
 	assert(should_not_happen);
       }
       
-      DEBUG_ASSERT(nof_children >= 2);
+      DEBUG_ASSERT(nof_children() >= 2);
 
-      if(tmin == 0 and tmax == nof_children) {
-	/* [0,n](g1,...,gn) == T */
+      if(tmin == 0 and tmax == nof_children()) {
 	if(determined and value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	tmin = 0; tmax = 0;
 	return true;      
       }
-      if(tmin == 1 and tmax == nof_children) {
-	/* [1,n](g1,...,gn) == OR(g1,...,gn) */
+      if(tmin == 1 and tmax == nof_children()) {
 	type = tOR;
 	tmin = 0; tmax = 0;
 	add_in_pstack(bc);
@@ -2693,8 +2765,8 @@ Gate::cnf_normalize(BC* const bc)
 #else
       /* A heuristic choice between adder and other construction... */
       if(!((tmax <= 2) or
-	   (tmin + 2 >= count_children()) or
-	   (tmin <= 2 && tmax + 2 >= count_children())))
+	   (tmin + 2 >= nof_children()) or
+	   (tmin <= 2 and tmax + 2 >= nof_children())))
 	{
 	  /* Do the adder construction */
 	  std::list<Gate *> child_list;
@@ -2720,7 +2792,6 @@ Gate::cnf_normalize(BC* const bc)
       /* The sharing decomposition construction */
 
       if(tmin == 0) {
-	/* [0,k](g1,...,gn) = ~(>= k+1)(g1,...,gn) */
 	Gate *new_child = new Gate(Gate::tATLEAST);
 	bc->install_gate(new_child);
 	new_child->add_in_pstack(bc);
@@ -2733,19 +2804,17 @@ Gate::cnf_normalize(BC* const bc)
 	return true;
       }
       
-      if(tmax == count_children()) {
+      if(tmax == nof_children()) {
 	DEBUG_ASSERT(tmin > 0);
-	/* [l,n](g1,...gn) = (>= l)(g1,...,gn) */
 	type = tATLEAST;
 	add_in_pstack(bc);
 	return true;
       }
       
       DEBUG_ASSERT(tmin > 0);
-      DEBUG_ASSERT(tmax < count_children());
+      DEBUG_ASSERT(tmax < nof_children());
       DEBUG_ASSERT(tmin <= tmax);
       
-      /* [l,u](g1,...,gn) =  (>= l)(g1,...,gn) & ~(>= u+1)(g1,...,gn) */
       Gate *new_child1 = new Gate(tATLEAST);
       bc->install_gate(new_child1);
       new_child1->add_in_pstack(bc);
@@ -2774,18 +2843,15 @@ Gate::cnf_normalize(BC* const bc)
   case tATLEAST:
     {
       /* The ATLEAST-gates must be eliminated */
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
+      DEBUG_ASSERT(nof_children() >= 1);
       if(tmin == 0) {
-	/* trivially true */
 	if(determined && value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	tmin = 0;
 	return true;
       }
-      if(tmin > nof_children) {
-	/* trivially false */
+      if(tmin > nof_children()) {
 	if(determined && value != false)
 	  return false;
 	transform_into_constant(bc, false);
@@ -2793,21 +2859,19 @@ Gate::cnf_normalize(BC* const bc)
 	return true;
       }
       if(tmin == 1) {
-	/* (>= 1)(g1,...,gn) == OR(g1,...,gn) */
 	type = tOR;
 	tmin = 0;
 	add_in_pstack(bc);
 	return true;
       }
-      if(tmin == nof_children) {
-	/* (>= n)(g1,...,gn) == AND(g1,...,gn) */
+      if(tmin == nof_children()) {
 	type = tAND;
 	tmin = 0;
 	add_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(nof_children >= 2);
-      DEBUG_ASSERT(tmin < nof_children);
+      DEBUG_ASSERT(nof_children() >= 2);
+      DEBUG_ASSERT(tmin < nof_children());
 
 #define POLYNOMIAL_ATLEAST_REWRITING
 #ifdef POLYNOMIAL_ATLEAST_REWRITING
@@ -2937,20 +3001,17 @@ Gate::cnf_normalize(BC* const bc)
 
   case tEVEN:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* EVEN(x) == NOT(x) */
 	type = Gate::tNOT;
 	add_in_pstack(bc);
 	return true;
       }
-      if(nof_children == 2) {
+      if(nof_children() == 2) {
 	/* binary EVENs are OK */
 	return true;
       }
-      /* N-ary EVENs for N >= 3 must be removed, e.g. by using the equality
-       * EVEN(g1,...,gn) == NOT(ODD(g1,...,gn)) */
       Gate* const new_odd = new Gate(tODD);
       bc->install_gate(new_odd);
       new_odd->add_in_pstack(bc);
@@ -2966,20 +3027,17 @@ Gate::cnf_normalize(BC* const bc)
 
   case tODD:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* ODD(x) == x */
 	type = Gate::tREF;
 	add_in_pstack(bc);
 	return true;
       }
-      if(nof_children == 2) {
+      if(nof_children() == 2) {
 	/* Binary ODDs are OK */
 	return true;
       }
-      /* N-ary EVENs for N >= 3 must be removed, e.g. by using the equality
-       * ODD(g1,...,gn) = ODD(g1,ODD(g2,...,gn)) */
       Gate* const new_odd = new Gate(tODD);
       bc->install_gate(new_odd);
       new_odd->add_in_pstack(bc);
@@ -3030,8 +3088,8 @@ Gate::edimacs_normalize(BC* const bc)
   switch(type) {
   case tFALSE:
     {
-      DEBUG_ASSERT(!children);
-      if(determined && value != false)
+      DEBUG_ASSERT(nof_children() == 0);
+      if(determined and value != false)
 	return false;
       determined = true;
       value = false;
@@ -3040,8 +3098,8 @@ Gate::edimacs_normalize(BC* const bc)
 
   case tTRUE:
     {
-      DEBUG_ASSERT(!children);
-      if(determined && value != true)
+      DEBUG_ASSERT(nof_children() == 0);
+      if(determined and value != true)
 	return false;
       determined = true;
       value = true;
@@ -3050,7 +3108,7 @@ Gate::edimacs_normalize(BC* const bc)
 
   case tVAR:
     {
-      DEBUG_ASSERT(count_children() == 0);
+      DEBUG_ASSERT(nof_children() == 0);
       return true;
     }
 
@@ -3059,8 +3117,8 @@ Gate::edimacs_normalize(BC* const bc)
       /*
        * Remove REFs
        */
-      DEBUG_ASSERT(count_children() == 1);
-      Gate * const child = children->child;
+      DEBUG_ASSERT(nof_children() == 1);
+      Gate * const child = first_child();
       DEBUG_ASSERT(child != this);
       if(determined) {
 	if(child->determined && value != child->value)
@@ -3080,8 +3138,8 @@ Gate::edimacs_normalize(BC* const bc)
 
   case tNOT:
     {
-      DEBUG_ASSERT(count_children() == 1);
-      Gate * const child = children->child;
+      DEBUG_ASSERT(nof_children() == 1);
+      Gate * const child = first_child();
       /*
        * The value of a determined NOT-gate must be propagated downwards!
        * Otherwise the NOT-less translation may fail...
@@ -3101,9 +3159,9 @@ Gate::edimacs_normalize(BC* const bc)
        */
       DEBUG_ASSERT(!determined);
       if(child->type == tNOT) {
-	/* g := ~~h  --> g := h */
-	DEBUG_ASSERT(child->count_children() == 1);
-	Gate * const grandchild = child->children->child;
+	/* g := NOT(NOT(h))  --> g := h */
+	DEBUG_ASSERT(child->nof_children() == 1);
+	Gate* const grandchild = child->first_child();
 	DEBUG_ASSERT(grandchild != this);
 	while(parents) parents->change_child(grandchild);
 	while(handles) handles->change_gate(grandchild);
@@ -3117,8 +3175,8 @@ Gate::edimacs_normalize(BC* const bc)
   case tOR:
   case tAND:
     {
-      DEBUG_ASSERT(count_children() >= 1);
-      if(count_children() == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* Unary ANDs and ORs are removed */
 	type = tREF;
 	add_in_pstack(bc);
@@ -3129,11 +3187,10 @@ Gate::edimacs_normalize(BC* const bc)
     
   case tEQUIV:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* EQUIV(x) = T */
-	if(determined && value == false)
+	if(determined and value == false)
 	  return false;
 	transform_into_constant(bc, true);
 	return true;
@@ -3143,7 +3200,7 @@ Gate::edimacs_normalize(BC* const bc)
 
   case Gate::tITE:
     {
-      DEBUG_ASSERT(count_children() == 3);
+      DEBUG_ASSERT(nof_children() == 3);
       return true;
     }
 
@@ -3151,46 +3208,45 @@ Gate::edimacs_normalize(BC* const bc)
     {
       /* Threshold gates must be eliminated! */
       
-      DEBUG_ASSERT(count_children() >= 1);
-      if(tmin > count_children()) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(tmin > nof_children()) {
 	/* trivially false */
-	if(determined && value == true)
+	if(determined and value == true)
 	  return false;
 	transform_into_constant(bc, false);
 	tmin = 0; tmax = 0;
 	return true;
       }
-      if(tmax > count_children())
-	tmax = count_children();
+      if(tmax > nof_children())
+	tmax = nof_children();
       if(tmin > tmax) {
 	/* trivially false */
-	if(determined && value == true)
+	if(determined and value == true)
 	  return false;
 	transform_into_constant(bc, false);
 	tmin = 0; tmax = 0;
 	return true;
       }
 
-      DEBUG_ASSERT(tmin <= tmax);
-      DEBUG_ASSERT(tmax <= count_children());
+      DEBUG_ASSERT(tmin <= tmax and tmax <= nof_children());
       
-      if(count_children() == 1) {
-	if(tmin == 0 && tmax == 1) {
-	  /* [0,1](x) == T */
-	  if(determined && value == false)
-	    return false;
-	  transform_into_constant(bc, true);
-	  tmin = 0; tmax = 0;
-	  return true;
-	}
-	else if(tmin == 0 && tmax == 0) {
+      if(nof_children() == 1) {
+	if(tmin == 0 and tmax == 0) {
 	  /* [0,0](x) == NOT(x) */
 	  type = Gate::tNOT;
 	  tmin = 0; tmax = 0;
 	  add_in_pstack(bc);
 	  return true;
 	}
-	else if(tmin == 1 && tmax == 1) {
+	else if(tmin == 0 and tmax == 1) {
+	  /* [0,1](x) == T */
+	  if(determined and value == false)
+	    return false;
+	  transform_into_constant(bc, true);
+	  tmin = 0; tmax = 0;
+	  return true;
+	}
+	else if(tmin == 1 and tmax == 1) {
 	  /* [1,1](x) == x */
 	  type = Gate::tREF;
 	  tmin = 0; tmax = 0;
@@ -3200,11 +3256,11 @@ Gate::edimacs_normalize(BC* const bc)
 	assert(should_not_happen);
       }
       
-      DEBUG_ASSERT(count_children() >= 2);
+      DEBUG_ASSERT(nof_children() >= 2);
 
-      if(tmin == 0 && tmax == count_children()) {
+      if(tmin == 0 and tmax == nof_children()) {
 	/* [0,n](g1,...,gn) == T */
-	if(determined && value == false)
+	if(determined and value == false)
 	  return false;
 	transform_into_constant(bc, true);
 	tmin = 0; tmax = 0;
@@ -3226,7 +3282,7 @@ Gate::edimacs_normalize(BC* const bc)
 	  return true;
 	}
       
-      if(tmax == count_children())
+      if(tmax == nof_children())
 	{
 	  DEBUG_ASSERT(tmin > 0);
 	  /* [l,n](g1,...gn) = (>= l)(g1,...,gn) */
@@ -3235,9 +3291,9 @@ Gate::edimacs_normalize(BC* const bc)
 	  return true;
 	}
       
-      DEBUG_ASSERT(tmin > 0);
-      DEBUG_ASSERT(tmax < count_children());
+      DEBUG_ASSERT(0 < tmin);
       DEBUG_ASSERT(tmin <= tmax);
+      DEBUG_ASSERT(tmax < nof_children());
       
       /* [l,u](g1,...,gn) =  (>= l)(g1,...,gn) & ~(>= u+1)(g1,...,gn) */
       Gate *new_child1 = new Gate(tATLEAST);
@@ -3266,41 +3322,40 @@ Gate::edimacs_normalize(BC* const bc)
     
   case tATLEAST:
     {
-      DEBUG_ASSERT(count_children() >= 1);
+      DEBUG_ASSERT(nof_children() >= 1);
       if(tmin == 0) {
 	/* trivially true */
-	if(determined && value != true)
+	if(determined and value != true)
 	  return false;
 	transform_into_constant(bc, true);
 	tmin = 0;
 	return true;
       }
-      if(tmin > count_children()) {
+      if(tmin > nof_children()) {
 	/* trivially false */
-	if(determined && value != false)
+	if(determined and value != false)
 	  return false;
 	transform_into_constant(bc, false);
 	tmin = 0;
 	return true;
       }
-      if(tmin == count_children()) {
+      if(tmin == nof_children()) {
 	/* (>= n)(g1,...,gn) == AND(g1,...,gn) */
 	type = tAND;
 	tmin = 0;
 	add_in_pstack(bc);
 	return true;
       }
-      DEBUG_ASSERT(count_children() >= 2);
-      DEBUG_ASSERT(tmin < count_children());
+      DEBUG_ASSERT(nof_children() >= 2);
+      DEBUG_ASSERT(tmin < nof_children());
 
       return true;
     }
 
   case tEVEN:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* EVEN(x) == NOT(x) */
 	type = Gate::tNOT;
 	add_in_pstack(bc);
@@ -3311,9 +3366,8 @@ Gate::edimacs_normalize(BC* const bc)
 
   case tODD:
     {
-      const unsigned int nof_children = count_children();
-      DEBUG_ASSERT(nof_children >= 1);
-      if(nof_children == 1) {
+      DEBUG_ASSERT(nof_children() >= 1);
+      if(nof_children() == 1) {
 	/* ODD(x) == x */
 	type = Gate::tREF;
 	add_in_pstack(bc);
@@ -3717,55 +3771,6 @@ unsigned int Gate::count_children() const
 
 
 
-int Gate::cnf_count_clauses(const bool notless)
-{
-  switch(type) {
-  case tFALSE:
-    DEBUG_ASSERT(!children);
-    assert(determined && value == false);
-    return 0;
-  case tTRUE:
-    DEBUG_ASSERT(!children);
-    assert(determined && value == true);
-    return 0;
-  case tVAR:
-    DEBUG_ASSERT(!children);
-    return 0;
-  case tREF:
-    DEBUG_ASSERT(count_children() == 1);
-    if(notless) {
-      internal_error(text_NPN, __FILE__, __LINE__);
-    }
-    return 2;
-  case tNOT:
-    DEBUG_ASSERT(count_children() == 1);
-    if(notless) {
-      DEBUG_ASSERT(!determined);
-      DEBUG_ASSERT(children->child->type != tNOT);
-      return 0;
-    }
-    return 2;
-  case tOR:
-  case tAND:
-    DEBUG_ASSERT(count_children() >= 1);
-    return count_children() + 1;
-  case tEQUIV:
-  case tEVEN:
-  case tODD:
-    if(count_children() != 2)
-      internal_error(text_NPN, __FILE__,__LINE__);
-    return 4;
-  case tITE:
-    DEBUG_ASSERT(count_children() == 3);
-    return 4;
-  default:
-    internal_error(text_NPN, __FILE__, __LINE__);
-  }
-  assert(should_not_happen);
-  return 0;
-}
-
-
 
 
 
@@ -3819,7 +3824,7 @@ void Gate::cnf_get_clauses(std::list<std::vector<int> *> &clauses,
     {
       DEBUG_ASSERT(count_children() == 1);
       if(notless) {
-	if(determined || children->child->type == tNOT)
+	if(determined or children->child->type == tNOT)
 	  internal_error(text_NPN, __FILE__, __LINE__);
 	return;
       }
@@ -4048,97 +4053,101 @@ void Gate::cnf_get_clauses(std::list<std::vector<int> *> &clauses,
   assert(should_not_happen);
 }
 
-
-
-
-unsigned int Gate::cnf_count_clauses_polarity(const bool notless)
+void Gate::xcnf_get_clauses(std::list<std::vector<int> *> &cnf_clauses,
+			    std::list<std::vector<int> *> &xor_clauses,
+			    const bool notless)
 {
-  switch(type)
+  DEBUG_ASSERT(temp >= 1);
+
+  cnf_clauses.clear();
+  xor_clauses.clear();
+
+  switch(type) {
+  case tFALSE:
+  case tTRUE:
+  case tVAR:
+  case tREF:
+  case tNOT:
+  case tOR:
+  case tAND:
+  case tITE:
+    return cnf_get_clauses(cnf_clauses, notless);
+  case tEQUIV:
     {
-    case tFALSE:
-      DEBUG_ASSERT(!children);
-      assert(determined && value == false);
-      return 0;
-
-    case tTRUE:
-      DEBUG_ASSERT(!children);
-      assert(determined && value == true);
-      return 0;
-
-    case tVAR:
-      DEBUG_ASSERT(!children);
-      return 0;
-
-    case tREF:
-      {
-	DEBUG_ASSERT(count_children() == 1);
-	if(notless)
-	  internal_error(text_NPN, __FILE__, __LINE__);
-	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += 1;
-	if(mir_neg) nof_clauses += 1;
-	return nof_clauses;
-      }
-
-    case tNOT:
-      {
-	DEBUG_ASSERT(count_children() == 1);
-	if(notless)
-	  internal_error(text_NPN, __FILE__, __LINE__);
-	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += 1;
-	if(mir_neg) nof_clauses += 1;
-	return nof_clauses;
-      }
-
-    case tOR:
-      {
-	const unsigned int nof_children = count_children();
-	assert(nof_children >= 1);
-	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += 1;
-	if(mir_neg) nof_clauses += nof_children;
-	return nof_clauses;
-      }
-    case tAND:
-      {
-	const unsigned int nof_children = count_children();
-	assert(nof_children >= 1);
-	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += nof_children;
-	if(mir_neg) nof_clauses += 1;
-	return nof_clauses;
-      }
-
-
-    case tEQUIV:
-    case tEVEN:
-    case tODD:
-      {
-	if(count_children() != 2)
-	  internal_error(text_NPN, __FILE__,__LINE__);
- 	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += 2;
-	if(mir_neg) nof_clauses += 2;
-	return nof_clauses;
-      }
-
-    case tITE:
-      {
-	DEBUG_ASSERT(count_children() == 3);
- 	unsigned int nof_clauses = 0;
-	if(mir_pos) nof_clauses += 2;
-	if(mir_neg) nof_clauses += 2;
-	return nof_clauses;
-      }
-
-    default:
-      internal_error(text_NPN, __FILE__, __LINE__);
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      ChildAssoc *ca = children;
+      Gate *child1 = ca->child; ca = ca->next_child;
+      Gate *child2 = ca->child; ca = ca->next_child;
+      DEBUG_ASSERT(ca == 0);
+      int c1lit = child1->temp;
+      int c2lit = child2->temp;
+      if(notless && child1->type == tNOT)
+	c1lit = -child1->children->child->temp;
+      if(notless && child2->type == tNOT)
+	c2lit = -child2->children->child->temp;
+      /* g := c1 == c2 i.e. g ^ c1 ^ c2 = T */
+      std::vector<int> *clause = new std::vector<int>();
+      xor_clauses.push_back(clause);
+      clause->push_back(temp);
+      clause->push_back(c1lit);
+      clause->push_back(c2lit); 
+      return;
     }
-
-  internal_error(text_SNH, __FILE__, __LINE__);
-  return 0;
+  case tEVEN:
+    {
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      ChildAssoc *ca = children;
+      Gate *child1 = ca->child; ca = ca->next_child;
+      Gate *child2 = ca->child; ca = ca->next_child;
+      DEBUG_ASSERT(ca == 0);
+      int c1lit = child1->temp;
+      int c2lit = child2->temp;
+      if(notless && child1->type == tNOT)
+	c1lit = -child1->children->child->temp;
+      if(notless && child2->type == tNOT)
+	c2lit = -child2->children->child->temp;
+      /* g := even(c1,c2) i.e. g ^ c1 ^ c2 = T */
+      std::vector<int> *clause = new std::vector<int>();
+      xor_clauses.push_back(clause);
+      clause->push_back(temp);
+      clause->push_back(c1lit);
+      clause->push_back(c2lit); 
+      return;
+    }
+  case tODD:
+    {
+      if(count_children() != 2)
+	fprintf(stderr, "%u ", count_children());
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      ChildAssoc *ca = children;
+      Gate *child1 = ca->child; ca = ca->next_child;
+      Gate *child2 = ca->child; ca = ca->next_child;
+      DEBUG_ASSERT(ca == 0);
+      int c1lit = child1->temp;
+      int c2lit = child2->temp;
+      if(notless && child1->type == tNOT)
+	c1lit = -child1->children->child->temp;
+      if(notless && child2->type == tNOT)
+	c2lit = -child2->children->child->temp;
+      /* g := c1 ^ c2 i.e. g ^ c1 ^ c2 = F i.e.  !g ^ c1 ^ c2 == T */
+      std::vector<int> *clause = new std::vector<int>();
+      xor_clauses.push_back(clause);
+      clause->push_back(-temp);
+      clause->push_back(c1lit);
+      clause->push_back(c2lit); 
+      return;
+    }
+  default:
+    internal_error(text_NI, __FILE__, __LINE__, typeNames[type]);
+  }
+  assert(should_not_happen);
 }
+
+
+
 
 
 void Gate::cnf_get_clauses_polarity(std::list<std::vector<int> *> &clauses,
@@ -4469,6 +4478,57 @@ void Gate::cnf_get_clauses_polarity(std::list<std::vector<int> *> &clauses,
 
 
 
+void Gate::xcnf_get_clauses_polarity(std::list<std::vector<int> *> &cnf_clauses,
+				     std::list<std::vector<int> *> &xor_clauses,
+				     const bool notless)
+{
+  DEBUG_ASSERT(temp >= 1);
+  
+  cnf_clauses.clear();
+  xor_clauses.clear();
+
+  switch(type) {
+  case tFALSE:
+  case tTRUE:
+  case tVAR:
+  case tREF:
+  case tNOT:
+  case tOR:
+  case tAND:
+  case tITE:
+    return cnf_get_clauses_polarity(cnf_clauses, notless);
+  case tEQUIV:
+    {    
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      if(mir_pos && mir_neg)
+	return xcnf_get_clauses(cnf_clauses, xor_clauses, notless);
+      return cnf_get_clauses_polarity(cnf_clauses, notless);
+    }
+  case tEVEN:
+    {
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      if(mir_pos && mir_neg)
+	return xcnf_get_clauses(cnf_clauses, xor_clauses, notless);
+      return cnf_get_clauses_polarity(cnf_clauses, notless);
+    }
+  case tODD:
+    {
+      if(count_children() != 2)
+	internal_error(text_NPN, __FILE__, __LINE__);
+      if(mir_pos && mir_neg)
+	return xcnf_get_clauses(cnf_clauses, xor_clauses, notless);
+      return cnf_get_clauses_polarity(cnf_clauses, notless);
+    }
+  default:
+    internal_error(text_NI, __FILE__, __LINE__, typeNames[type]);
+  }
+  assert(should_not_happen);
+}
+
+
+
 
 
 /*
@@ -4784,13 +4844,11 @@ Gate::count_child_info(unsigned int& nof_true,
 bool
 Gate::is_justified()
 {
-  unsigned int nof_children, nof_true, nof_false, nof_undet;
-
   if(!determined)
     return false;
 
+  unsigned int nof_true, nof_false, nof_undet;
   count_child_info(nof_true, nof_false, nof_undet);
-  nof_children = nof_true + nof_false + nof_undet;
   
   switch(type)
     {
@@ -4804,62 +4862,62 @@ Gate::is_justified()
       DEBUG_ASSERT(!(nof_false > 0 and value == false));
       return((value == true and nof_false > 0) or
 	     (value == false and nof_true > 0));
-    
+
     case tEQUIV:
-      DEBUG_ASSERT(nof_children >= 1);
+      DEBUG_ASSERT(nof_children() >= 1);
       if(value == true) {
-	if(nof_children == 1)
+	if(nof_children() == 1)
 	  return true;
-	if(nof_true == nof_children)
+	if(nof_true == nof_children())
 	  return true;
-	if(nof_false == nof_children)
+	if(nof_false == nof_children())
 	  return true;
       } else {
-	if(nof_true > 0 && nof_false > 0)
+	if(nof_true > 0 and nof_false > 0)
 	  return true;
       }
       return false;
 
     case tOR:
       if(value == true) {
-	DEBUG_ASSERT(nof_false < nof_children);
+	DEBUG_ASSERT(nof_false < nof_children());
 	if(nof_true > 0)
 	  return true;
       } else {
 	DEBUG_ASSERT(nof_true == 0);
-	if(nof_false == nof_children)
+	if(nof_false == nof_children())
 	  return true;
       }
       return false;
       
     case tAND:
       if(value == false) {
-	DEBUG_ASSERT(nof_true < nof_children);
+	DEBUG_ASSERT(nof_true < nof_children());
 	if(nof_false > 0)
 	  return true;
       } else {
 	DEBUG_ASSERT(nof_false == 0);
-	if(nof_true == nof_children)
+	if(nof_true == nof_children())
 	  return true;
       }
       return false;
 
     case tODD:
       if(value == true) {
-	if(nof_true + nof_false == nof_children && ((nof_true % 2) == 1))
+	if(nof_true + nof_false == nof_children() and ((nof_true % 2) == 1))
 	  return true;
       } else {
-	if(nof_true + nof_false == nof_children && ((nof_true % 2) == 0))
+	if(nof_true + nof_false == nof_children() and ((nof_true % 2) == 0))
 	  return true;
       }
       return false;
 
     case tEVEN:
       if(value == true) {
-	if(nof_true + nof_false == nof_children && ((nof_true % 2) == 0))
+	if(nof_true + nof_false == nof_children() and ((nof_true % 2) == 0))
 	  return true;
       } else {
-	if(nof_true + nof_false == nof_children && ((nof_true % 2) == 1))
+	if(nof_true + nof_false == nof_children() and ((nof_true % 2) == 1))
 	  return true;
       }
       return false;
@@ -4870,24 +4928,24 @@ Gate::is_justified()
 	Gate* const then_child = children->next_child->child;
 	Gate* const else_child = children->next_child->next_child->child;
 	if(value == true) {
-	  if(if_child->determined && if_child->value == true &&
-	     then_child->determined && then_child->value == true)
+	  if(if_child->determined and if_child->value == true and
+	     then_child->determined and then_child->value == true)
 	    return true;
-	  if(if_child->determined && if_child->value == false &&
-	     else_child->determined && else_child->value == true)
+	  if(if_child->determined and if_child->value == false and
+	     else_child->determined and else_child->value == true)
 	    return true;
-	  if(then_child->determined && then_child->value == true &&
-	     else_child->determined && else_child->value == true)
+	  if(then_child->determined and then_child->value == true and
+	     else_child->determined and else_child->value == true)
 	    return true;
 	} else {
-	  if(if_child->determined && if_child->value == true &&
-	     then_child->determined && then_child->value == false)
+	  if(if_child->determined and if_child->value == true and
+	     then_child->determined and then_child->value == false)
 	    return true;
-	  if(if_child->determined && if_child->value == false &&
-	     else_child->determined && else_child->value == false)
+	  if(if_child->determined and if_child->value == false and
+	     else_child->determined and else_child->value == false)
 	    return true;
-	  if(then_child->determined && then_child->value == false &&
-	     else_child->determined && else_child->value == false)
+	  if(then_child->determined and then_child->value == false and
+	     else_child->determined and else_child->value == false)
 	    return true;
 	}
 	return false;
@@ -4895,12 +4953,12 @@ Gate::is_justified()
       
     case tTHRESHOLD:
       if(value == true) {
-	if(tmin <= nof_true and nof_children - nof_false <= tmax)
+	if(tmin <= nof_true and nof_children() - nof_false <= tmax)
 	  return true;
       } else {
 	if(nof_true > tmax)
 	  return true;
-	if(nof_children - nof_false < tmin)
+	if(nof_children() - nof_false < tmin)
 	  return true;
       }
       return false;
@@ -4910,7 +4968,7 @@ Gate::is_justified()
 	if(nof_true >= tmin)
 	  return true;
       } else {
-	if(nof_children - nof_false < tmin)
+	if(nof_children() - nof_false < tmin)
 	  return true;
       }
       return false;
@@ -5030,7 +5088,7 @@ void Gate::mir_propagate_polarity(bool polarity)
 	  ca->child->mir_propagate_polarity(false);
 	return;
       }
-      if(nof_true < tmin && nof_children - nof_false <= tmax) {
+      if(nof_true < tmin and nof_children - nof_false <= tmax) {
 	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
 	  ca->child->mir_propagate_polarity(true);
 	return;
@@ -5042,7 +5100,7 @@ void Gate::mir_propagate_polarity(bool polarity)
 	  ca->child->mir_propagate_polarity(true);
 	return;
       }
-      if(nof_true < tmin && nof_children - nof_false <= tmax) {
+      if(nof_true < tmin and nof_children - nof_false <= tmax) {
 	for(ChildAssoc *ca = children; ca; ca = ca->next_child)
 	  ca->child->mir_propagate_polarity(false);
 	return;
@@ -5188,7 +5246,7 @@ bool Gate::check_consistency()
     return true;
   case tEQUIV:
     if(value == true) {
-      if(nof_true > 0 && nof_false > 0)
+      if(nof_true > 0 and nof_false > 0)
 	return false;
       return true;
     }
@@ -5229,24 +5287,24 @@ bool Gate::check_consistency()
     Gate *then_child = children->next_child->child;
     Gate *else_child = children->next_child->next_child->child;
     if(value == true) {
-      if(if_child->determined && if_child->value == true &&
-	 then_child->determined && then_child->value == false)
+      if(if_child->determined and if_child->value == true and
+	 then_child->determined and then_child->value == false)
 	return false;
-      if(if_child->determined && if_child->value == false &&
-	 else_child->determined && else_child->value == false)
+      if(if_child->determined and if_child->value == false and
+	 else_child->determined and else_child->value == false)
 	return false;
-      if(then_child->determined && then_child->value == false &&
-	 else_child->determined && else_child->value == false)
+      if(then_child->determined and then_child->value == false and
+	 else_child->determined and else_child->value == false)
 	return false;
     } else {
-      if(if_child->determined && if_child->value == true &&
-	 then_child->determined && then_child->value == true)
+      if(if_child->determined and if_child->value == true and
+	 then_child->determined and then_child->value == true)
 	return false;
-      if(if_child->determined && if_child->value == false &&
-	 else_child->determined && else_child->value == true)
+      if(if_child->determined and if_child->value == false and
+	 else_child->determined and else_child->value == true)
 	return false;
-      if(then_child->determined && then_child->value == true &&
-	 else_child->determined && else_child->value == true)
+      if(then_child->determined and then_child->value == true and
+	 else_child->determined and else_child->value == true)
 	return false;
     }
     return true;
@@ -5260,7 +5318,7 @@ bool Gate::check_consistency()
       return true;
     }
     /* value == false */
-    if(nof_true >= tmin && nof_children - nof_false <= tmax)
+    if(nof_true >= tmin and nof_children - nof_false <= tmax)
       return false;
     return true;
   default:

@@ -20,10 +20,21 @@
 #include <assert.h>
 #include "defs.hh"
 
-const char *BCPACKAGE_VERSION = "version 0.35";
+const char *BCPACKAGE_VERSION = "version 0.40";
 
 bool verbose = false;
 FILE *verbstr = stderr;
+
+void verbose_print(const char * fmt, ...)
+{
+  if(verbose && verbstr) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(verbstr, fmt, ap);
+    va_end(ap);
+    fflush(verbstr);
+  }
+}
 
 void internal_error(const char * fmt, ...)
 {

@@ -15,10 +15,10 @@
  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
-#include <climits>
 #include <cstdlib>
 #include <cassert>
 #include <cctype>
+#include <climits>
 #include <list>
 #include <queue>
 #include <algorithm>
@@ -98,70 +98,132 @@ BC::parse_circuit(const char* const filename)
 BC*
 BC::parse_circuit(FILE* const fp)
 {
-  extern int bcp_parse();
-  extern int bcp_restart(FILE *);
-  extern void bcp_error(const char *, ...);
-  extern void bcp_error2(const char *, ...);
-  extern std::list<char*> bcp_true_gate_names;
-  extern std::list<char*> bcp_false_gate_names;
-  extern BC *bcp_circuit;
-  extern bool _bcp_in_header;
-
-  std::list<Gate*> gate_stack;
-
-  bcp_true_gate_names.clear();
-  bcp_false_gate_names.clear();
-
   BC *circuit = new BC();
-  bcp_circuit = circuit;
 
-  /*
-   * Parse the circuit
-   */
-  _bcp_in_header = true;
-  bcp_restart(fp);
-  if(bcp_parse())
+  /* Read the header line in order to get the file format version */
+  const int max_header_line_length = 10;
+  char header[max_header_line_length];
+  if(fgets(header, max_header_line_length, fp) == 0) {
+    fprintf(stderr, "Could not read the header line\n");
     goto error_exit;
+  }
+  if(strcmp("BC1.0\x0a", header) == 0 ||
+     strcmp("BC1.0\x0d\x0a", header) == 0) {
+    extern int bcp_parse();
+    extern int bcp_restart(FILE *);
+    extern void bcp_error(const char *, ...);
+    extern void bcp_error2(const char *, ...);
+    extern std::list<char*> bcp_true_gate_names;
+    extern std::list<char*> bcp_false_gate_names;
+    extern BC *bcp_circuit;
+    extern int bcp_lineno;
+    std::list<Gate*> gate_stack;
+    
+    verbose_print("Using file format version 1.0\n");
 
-  /*
-   * Convert all undef gates into variable gates
-   */
-  for(Gate* gate = circuit->first_gate; gate; gate = gate->next)
-    {
-      if(gate->type == Gate::tUNDEF)
-	{
-	  DEBUG_ASSERT(gate->children == 0);
-	  gate->type = Gate::tVAR;
+    bcp_true_gate_names.clear();
+    bcp_false_gate_names.clear();
+    
+    bcp_circuit = circuit;
+    
+    /*
+     * Parse the circuit
+     */
+    bcp_restart(fp);
+    bcp_lineno++;
+    if(bcp_parse()) {
+      bcp_true_gate_names.clear();
+      bcp_false_gate_names.clear();
+      goto error_exit;
+    }
+    
+    /*
+     * Convert all undef gates into variable gates
+     */
+    for(Gate* gate = circuit->first_gate; gate; gate = gate->next)
+      {
+	if(gate->type == Gate::tUNDEF)
+	  {
+	    DEBUG_ASSERT(gate->children == 0);
+	    gate->type = Gate::tVAR;
+	  }
+      }
+    
+    /*
+     * Make constraints
+     */
+    for(std::list<char*>::iterator ci = bcp_true_gate_names.begin();
+	ci != bcp_true_gate_names.end();
+	ci++)
+      {
+	NameHandle *handle = circuit->find_gate(*ci);
+	if(!handle) {
+	  fprintf(stderr, "gate '%s' assigned to true but not defined\n", *ci);
+	  goto error_exit;
 	}
-    }
+	/*circuit->force_true(handle->get_gate());*/
+	circuit->assigned_to_true.push_back(handle->get_gate());
+      }
+    for(std::list<char*>::iterator ci = bcp_false_gate_names.begin();
+	ci != bcp_false_gate_names.end();
+	ci++)
+      {
+	NameHandle *handle = circuit->find_gate(*ci);
+	if(!handle) {
+	  fprintf(stderr, "gate '%s' assigned to false but not defined\n", *ci);
+	  goto error_exit;
+	}
+	/*circuit->force_false(handle->get_gate());*/
+	circuit->assigned_to_false.push_back(handle->get_gate());
+      }
+  }
+  else if(strcmp("BC1.1\x0a", header) == 0 ||
+	  strcmp("BC1.1\x0d\x0a", header) == 0) {
+    extern int bcp11_parse();
+    extern int bcp11_restart(FILE *);
+    //extern void bcp11_error(const char *, ...);
+    //extern void bcp11_error2(const char *, ...);
+    extern std::list<Gate*> bcp11_assigned_gates;
+    extern BC *bcp11_circuit;
+    extern int bcp11_lineno;
+    std::list<Gate*> gate_stack;
+    
+    verbose_print("Using file format version 1.1\n");
 
-  /*
-   * Make constraints
-   */
-  for(std::list<char*>::iterator ci = bcp_true_gate_names.begin();
-      ci != bcp_true_gate_names.end();
-      ci++)
-    {
-      NameHandle *handle = circuit->find_gate(*ci);
-      if(!handle) {
-	fprintf(stderr, "gate '%s' assigned to true but not defined\n", *ci);
-	goto error_exit;
-      }
-      /*circuit->force_true(handle->get_gate());*/
-      circuit->assigned_to_true.push_back(handle->get_gate());
+    bcp11_assigned_gates.clear();
+    
+    bcp11_circuit = circuit;
+    
+    /* Parse the circuit */
+    bcp11_restart(fp);
+    bcp11_lineno++;
+    if(bcp11_parse()) {
+      bcp11_assigned_gates.clear();
+      goto error_exit;
     }
-  for(std::list<char*>::iterator ci = bcp_false_gate_names.begin();
-      ci != bcp_false_gate_names.end();
-      ci++)
-    {
-      NameHandle *handle = circuit->find_gate(*ci);
-      if(!handle) {
-	fprintf(stderr, "gate '%s' assigned to false but not defined\n", *ci);
-	goto error_exit;
+    
+    /* Convert all undef gates into variable gates */
+    for(Gate* gate = circuit->first_gate; gate; gate = gate->next) {
+      if(gate->type == Gate::tUNDEF) {
+	DEBUG_ASSERT(gate->children == 0);
+	gate->type = Gate::tVAR;
       }
-      /*circuit->force_false(handle->get_gate());*/
-      circuit->assigned_to_false.push_back(handle->get_gate());
     }
+    
+    /*
+     * Make constraints
+     */
+    for(std::list<Gate*>::const_iterator ci = bcp11_assigned_gates.begin();
+	ci != bcp11_assigned_gates.end();
+	ci++)
+      {
+	circuit->assigned_to_true.push_back(*ci);
+      }
+  }
+  else {
+    fprintf(stderr, "Illegal header line '%s'", header);
+    goto error_exit;
+  }
 
   /*
    * Test acyclicity
@@ -169,14 +231,9 @@ BC::parse_circuit(FILE* const fp)
   if(!circuit->test_acyclicity())
     goto error_exit;
 
-  bcp_true_gate_names.clear();
-  bcp_false_gate_names.clear();
-
   return circuit;
 
  error_exit:
-  bcp_true_gate_names.clear();
-  bcp_false_gate_names.clear();
   if(circuit) delete circuit;
   return 0;
 }
@@ -533,14 +590,12 @@ BC::print_assignment(FILE* const fp)
 	    {
 	      const char* const name = ((NameHandle *)handle)->get_name();
 	      DEBUG_ASSERT(name);
-	      fprintf(fp, "%s%s ", gate->value?"":"~", name);
+	      fprintf(fp, "%s%s ", gate->value?"":"!", name);
 	    }
 	  handle = handle->get_next();
 	}
     }
 }
-
-
 
 
 
@@ -961,6 +1016,13 @@ BC::to_dot(FILE * const fp) const
 
 
 
+
+
+
+
+
+
+
 /**************************************************************************
  *
  * Sharing of common substructure
@@ -985,9 +1047,9 @@ bool BC::share()
 
   if(verbose) {
     compute_size(nof_gates, nof_edges);
-    fprintf(verbstr, "The circuit has %u gates and %u edges after sharing\n",
-	    nof_gates, nof_edges);
-    fflush(verbstr); }
+    verbose_print("The circuit has %u gates and %u edges after sharing\n",
+		  nof_gates, nof_edges);
+  }
   
   //ht->print_distribution();
   delete ht; ht = 0;
@@ -1044,6 +1106,22 @@ BC::get_top_down_ordering() const
     }
   return ordering;
 }
+
+std::vector<Gate*>*
+BC::get_bottom_up_ordering() const
+{
+  std::vector<Gate*>* ordering = get_top_down_ordering();
+  const unsigned int N = ordering->size();
+  for(unsigned int i = 0; i < N / 2; i++)
+    {
+      Gate* tmp = ordering->operator[](i);
+      ordering->operator[](i) = ordering->operator[](N-1-i);
+      ordering->operator[](N-i-1) = tmp;
+    }
+  return ordering;
+}
+
+
 
 /*
  * WARNING: uses temp fields
@@ -1172,12 +1250,8 @@ BC::cnf_normalize()
   
   remove_deleted_gates(nof_removed, nof_gates);
 
-  if(verbose)
-    {
-      fprintf(verbstr, "The circuit has %d gates after CNF normalization\n",
-	      nof_gates);
-      fflush(verbstr);
-    }
+  verbose_print("The circuit has %d gates after CNF normalization\n",
+		nof_gates);
 
   return true;
 }
@@ -1215,10 +1289,7 @@ BC::edimacs_normalize()
 
   remove_deleted_gates(nof_removed, nof_gates);
 
-  if(verbose) {
-    fprintf(verbstr, "The circuit has %d gates after normalization\n",
-            nof_gates);
-    fflush(verbstr); }
+  verbose_print("The circuit has %d gates after normalization\n", nof_gates);
 
   return true;
 }
@@ -1234,7 +1305,7 @@ BC::edimacs_normalize()
  **************************************************************************/
 
 bool
-BC::simplify(const bool opt_preserve_cnf_normalized_form)
+BC::simplify(const SimplifyOptions& opts)
 {
   unsigned int nof_gates, nof_removed, nof_edges;
 
@@ -1261,7 +1332,7 @@ BC::simplify(const bool opt_preserve_cnf_normalized_form)
 	  gate->in_pstack = false;
 	  pstack = gate->pstack_next;
 	  gate->pstack_next = 0;
-	  if(!gate->simplify(this, opt_preserve_cnf_normalized_form))
+	  if(!gate->simplify(this, opts))
 	    goto conflict_exit;
 	}
       
@@ -1269,10 +1340,8 @@ BC::simplify(const bool opt_preserve_cnf_normalized_form)
       
       if(verbose) {
 	compute_size(nof_gates, nof_edges);
-	fprintf(verbstr,
-		"The circuit has %u gates and %u edges after simplification\n",
-		nof_gates, nof_edges);
-	fflush(verbstr); }
+	verbose_print("The circuit has %u gates and %u edges after simplification\n", nof_gates, nof_edges);
+      }
       
       if(!share())
 	goto conflict_exit;
@@ -1320,7 +1389,7 @@ void
 BC::to_edimacs(FILE *out, const bool notless, const bool do_simplify)
 {
   int nof_variables;
-  
+
   /*
    * Normalize gates
    */
@@ -1333,7 +1402,8 @@ BC::to_edimacs(FILE *out, const bool notless, const bool do_simplify)
    */
   if(do_simplify)
     {
-      if(!simplify(false))
+      SimplifyOptions opts;
+      if(!simplify(opts))
         goto unsat_exit;
     }
   else

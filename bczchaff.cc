@@ -46,7 +46,7 @@ usage(FILE* const fp, const char* argv0)
   if(!*program_name) program_name = default_program_name;
   fprintf(fp,
 "bczchaff, %s by Tommi Junttila\n"
-"Available at http://www.tcs.hut.fi/~tjunttil/circuits/index.html\n"
+"Available at http://users.ics.aalto.fi/tjunttil/circuits/index.html\n"
 "\n"
 "Includes zChaff (http://www.princeton.edu/~chaff/zchaff.html) by\n"
 "Princeton University, see the URL for the license accepted by the person\n"
@@ -124,20 +124,14 @@ main(const int argc, const char** argv)
 
   parse_options(argc, argv);
   
-  if(verbose) {
-    fprintf(verbstr, "Parsing from %s\n", infilename?infilename:"stdin");
-    fflush(verbstr); }
+  verbose_print("Parsing from %s\n", infilename?infilename:"stdin");
   
   circuit = BC::parse_circuit(infile);
   if(circuit == 0)
     exit(-1);
   if(infilename) fclose(infile);
 
-  if(verbose)
-    {
-      fprintf(verbstr, "The circuit has %d gates\n", circuit->count_gates());
-      fflush(verbstr);
-    }
+  verbose_print("The circuit has %d gates\n", circuit->count_gates());
   
 
   if(opt_print_input_gates and verbstr)
