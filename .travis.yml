@@ -4,6 +4,12 @@ compiler:
         - clang
         - gcc
 
+before_install:
+        - sudo add-apt-repository --yes ppa:kalakris/cmake
+        - sudo apt-get update -qq
+
+install: sudo apt-get install cmake
+
 before_script:
         - mkdir build
         - cd build
