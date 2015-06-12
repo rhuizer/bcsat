@@ -24,7 +24,6 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
-#include <stdint.h>
 
 #include "minisat/mtl/IntTypes.h"
 #include "minisat/mtl/Vec.h"

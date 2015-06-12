@@ -16,6 +16,8 @@ set(SOURCES defs.cc bc.cc gate.cc gatehash.cc handle.cc timer.cc heap.cc
             ${BISON_bcsat_parser_OUTPUTS}
             ${FLEX_bcsat_lexer_OUTPUTS})
 
+add_definitions(-std=c++11)
+
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_executable(bc2cnf bc2cnf.cc ${SOURCES})
