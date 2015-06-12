@@ -357,19 +357,19 @@ int BC::minisat_solve(const bool perform_simplifications
 	    solver->propagations);
     fprintf(verbstr, "conflict literals     : %-12lld   (%4.2f %% deleted)\n", solver->tot_literals, (solver->max_literals - solver->tot_literals)*100 / (double)solver->max_literals);
 #else
-    fprintf(verbstr, "restarts              : %"I64_fmt"\n",
+    fprintf(verbstr, "restarts              : %" I64_fmt"\n",
 	    solver->stats.starts);
     /*
-    fprintf(verbstr, "max level             : %"I64_fmt"\n",
+    fprintf(verbstr, "max level             : %" I64_fmt"\n",
 	    solver->stats.max_level);
     */
-    fprintf(verbstr, "conflicts             : %-12"I64_fmt"\n",
+    fprintf(verbstr, "conflicts             : %-12" I64_fmt"\n",
 	    solver->stats.conflicts);
-    fprintf(verbstr, "decisions             : %-12"I64_fmt"\n",
+    fprintf(verbstr, "decisions             : %-12" I64_fmt"\n",
 	    solver->stats.decisions);
-    fprintf(verbstr, "propagations          : %-12"I64_fmt"\n",
+    fprintf(verbstr, "propagations          : %-12" I64_fmt"\n",
 	    solver->stats.propagations);
-    fprintf(verbstr, "conflict literals     : %-12"I64_fmt"   (%4.2f %% deleted)\n", solver->stats.tot_literals, (solver->stats.max_literals - solver->stats.tot_literals)*100 / (double)solver->stats.max_literals);
+    fprintf(verbstr, "conflict literals     : %-12" I64_fmt"   (%4.2f %% deleted)\n", solver->stats.tot_literals, (solver->stats.max_literals - solver->stats.tot_literals)*100 / (double)solver->stats.max_literals);
 #endif
     fflush(verbstr);
   }
