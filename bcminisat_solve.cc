@@ -347,15 +347,15 @@ int BC::minisat_solve(const bool perform_simplifications
   if(verbose) {
     fprintf(verbstr, "Minisat statistics:\n");
 #if defined(MINISAT2CORE) || defined(MINISAT2SIMP)
-    fprintf(verbstr, "restarts              : %lld\n",
+    fprintf(verbstr, "restarts              : %" PRIu64"\n",
 	    solver->starts);
-    fprintf(verbstr, "conflicts             : %-12lld\n",
+    fprintf(verbstr, "conflicts             : %-12" PRIu64"\n",
 	    solver->conflicts);
-    fprintf(verbstr, "decisions             : %-12lld\n",
+    fprintf(verbstr, "decisions             : %-12" PRIu64"\n",
 	    solver->decisions);
-    fprintf(verbstr, "propagations          : %-12lld\n",
+    fprintf(verbstr, "propagations          : %-12" PRIu64"\n",
 	    solver->propagations);
-    fprintf(verbstr, "conflict literals     : %-12lld   (%4.2f %% deleted)\n", solver->tot_literals, (solver->max_literals - solver->tot_literals)*100 / (double)solver->max_literals);
+    fprintf(verbstr, "conflict literals     : %-12" PRIu64"   (%4.2f %% deleted)\n", solver->tot_literals, (solver->max_literals - solver->tot_literals)*100 / (double)solver->max_literals);
 #else
     fprintf(verbstr, "restarts              : %" I64_fmt"\n",
 	    solver->stats.starts);
