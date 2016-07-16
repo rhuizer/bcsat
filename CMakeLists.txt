@@ -38,7 +38,7 @@ set_target_properties(bczchaff PROPERTIES
 	INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR};${zchaff_SOURCE_DIR}")
 target_link_libraries(bczchaff sat)
 
-add_subdirectory(minisat)
+add_subdirectory(minisat-2.2.0)
 add_executable(bcminisat2core bcminisat.cc bcminisat220_solve.cc ${SOURCES})
 set_target_properties(bcminisat2core PROPERTIES
 	COMPILE_DEFINITIONS "BC_HAS_MINISAT;MINISAT220CORE"
